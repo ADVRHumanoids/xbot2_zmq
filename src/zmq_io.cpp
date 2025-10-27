@@ -20,7 +20,7 @@ bool ZmqIO::on_initialize()
     subscriber = std::make_unique<zmq::socket_t>(*context, ZMQ_SUB);
     subscriber->bind(cmd_sub_addr);
     subscriber->set(zmq::sockopt::subscribe, "");
-    subscriber->set(zmq::sockopt::conflate, 1);
+    // subscriber->set(zmq::sockopt::conflate, 1);
 
     // add REP socket for request/response
     auto rep_bind_addr = "tcp://*:5557";
@@ -65,6 +65,7 @@ void ZmqIO::publish_js()
         
     std::string out;
     rx_msg.SerializeToString(&out);
+
     publisher->send(zmq::buffer(out), zmq::send_flags::none);
 }
 
@@ -189,12 +190,17 @@ void ZmqIO::handle_request_response()
 void ZmqIO::recv_cmd()
 {
     // currently not used
-    zmq::message_t cmd;
+    zmq::message_t cmd, cmd_tmp;
 
-    if (subscriber->recv(cmd, zmq::recv_flags::dontwait)) 
+    // consume any pending messages, keep only the last one
+    // Keep reading all available messages (non-blocking)
+    while (subscriber->recv(cmd_tmp, zmq::recv_flags::dontwait))
     {
-        // consume any pending messages, keep only the last one
-        while(subscriber->recv(cmd, zmq::recv_flags::dontwait));
+        cmd.copy(cmd_tmp);
+    }
+
+    if (cmd.size() > 0)
+    {
 
         std::string cmd_str(static_cast<char*>(cmd.data()), cmd.size());
         rx_msg.ParseFromString(cmd_str);
@@ -213,11 +219,11 @@ void ZmqIO::recv_cmd()
             }
             
             if(joint_cmd.posref_size() != joint_cmd.name_size() ||
-               joint_cmd.velref_size() != joint_cmd.name_size() ||
-               joint_cmd.torref_size() != joint_cmd.name_size() ||
-               joint_cmd.k_size() != joint_cmd.name_size() ||
-               joint_cmd.d_size() != joint_cmd.name_size() ||
-               joint_cmd.ctrl_size() != joint_cmd.name_size()) 
+            joint_cmd.velref_size() != joint_cmd.name_size() ||
+            joint_cmd.torref_size() != joint_cmd.name_size() ||
+            joint_cmd.k_size() != joint_cmd.name_size() ||
+            joint_cmd.d_size() != joint_cmd.name_size() ||
+            joint_cmd.ctrl_size() != joint_cmd.name_size()) 
             {
                 jerror("inconsistent command sizes");
                 jinfo("name_size: {}, posref_size: {}, velref_size: {}, torref_size: {}, k_size: {}, d_size: {}, ctrl_size: {}",
@@ -230,7 +236,6 @@ void ZmqIO::recv_cmd()
                     joint_cmd.ctrl_size());
                 break;
             }
-
             j->setPositionReferenceMinimal(Eigen::Scalard(joint_cmd.posref(i)));
             j->setVelocityReference(Eigen::Scalard(joint_cmd.velref(i)));
             j->setEffortReference(Eigen::Scalard(joint_cmd.torref(i)));
@@ -245,6 +250,8 @@ void ZmqIO::recv_cmd()
 
         _robot->move();
     }
+    
+    
 
     // if no command received for 1s, release all control mode
     if(cmd_timeout.time_since_epoch().count() != 0 && 
