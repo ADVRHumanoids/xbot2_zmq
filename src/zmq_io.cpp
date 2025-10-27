@@ -241,6 +241,8 @@ void ZmqIO::recv_cmd()
 
         cmd_timeout = chrono::steady_clock::now() + 1s;
 
+        jinfo("qref = {}", _robot->getPositionReference().transpose().format(2));
+
         _robot->move();
     }
 
