@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+import "jointstate.proto";
+import "imu.proto";
+import "jointcmd.proto";
+
+message GenericRxMsg {
+    int32 seq = 1;
+    int64 stamp = 2;
+    JointState js = 3;
+    Imu imu = 4;
+    JointCommand cmd = 5;
+}

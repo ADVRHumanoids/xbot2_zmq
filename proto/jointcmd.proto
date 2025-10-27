@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+message JointCommand {
+    repeated string name = 1;
+    repeated float posRef = 8;
+    repeated float velRef = 9;
+    repeated float torRef = 10;
+    repeated float k = 11;
+    repeated float d = 12;
+    repeated uint32 ctrl = 13;
+}

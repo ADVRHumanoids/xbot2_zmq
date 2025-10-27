@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+message Imu {
+
+
+    float orientation_x = 1;
+    float orientation_y = 2;
+    float orientation_z = 3;
+    float orientation_w = 4;
+
+    float angular_velocity_x = 5;
+    float angular_velocity_y = 6;
+    float angular_velocity_z = 7;
+
+    float linear_acceleration_x = 8;
+    float linear_acceleration_y = 9;
+    float linear_acceleration_z = 10;
+    
+    string name = 11;
+
+}
