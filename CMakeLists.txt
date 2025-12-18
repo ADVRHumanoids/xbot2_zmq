@@ -64,7 +64,22 @@ target_include_directories(zmq_io
     $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
 )
 
-install(TARGETS zmq_io zmq_io_protoc
+##
+add_xbot2_device(zmq_hal src/zmq_hal.cpp)
+
+target_link_libraries(zmq_hal
+    PRIVATE
+    cppzmq
+    zmq_io_protoc
+    protobuf::libprotobuf
+    )
+
+target_include_directories(zmq_hal
+    PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+)
+
+install(TARGETS zmq_io zmq_io_protoc zmq_hal
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
