@@ -12,7 +12,7 @@
 
 XBot::Hal::ZmqDeviceContainer::ZmqDeviceContainer(std::vector<DeviceInfo> devinfo,
                                                   const Device::CommonParams &params)
-    : DeviceContainerBase()
+    : DeviceContainerBase(), _recv_yaml("__zmq_hal_recv_yaml")
 {
     Journal j("zmq_hal");
 
@@ -91,25 +91,30 @@ XBot::Hal::ZmqDeviceContainer::ZmqDeviceContainer(std::vector<DeviceInfo> devinf
 
 
     // get urdf
-    auto urdf_str = response["urdf"].as<std::string>();
-    XBot::ConfigOptions xb_ifc_cfg;
-    xb_ifc_cfg.set_urdf(urdf_str);
-    xb_ifc_cfg.set_srdf("<robot name=\"robot\"/>");
+    if(auto n = response["urdf"])
+    {
+
+        auto urdf_str = n.as<std::string>();
+        XBot::ConfigOptions xb_ifc_cfg;
+        xb_ifc_cfg.set_urdf(urdf_str);
+        xb_ifc_cfg.set_srdf("<robot name=\"robot\"/>");
 
 
-    // change framework to xbot2rt
-    xb_ifc_cfg.set_parameter<std::string>("robot_type", "xbot2rt");
+        // change framework to xbot2rt
+        xb_ifc_cfg.set_parameter<std::string>("robot_type", "xbot2rt");
 
-    // load robot interface cfg object to param manager
-    pm.setParam("/xbot/hal/robot_ifc_cfg", xb_ifc_cfg);
+        // load robot interface cfg object to param manager
+        pm.setParam("/xbot/hal/robot_ifc_cfg", xb_ifc_cfg);
 
-    // make an xbi to get info about hal
-    auto xbi = ModelInterface::getModel(xb_ifc_cfg);
-    xbi->print(std::cout);
+        // make an xbi to get info about hal
+        auto xbi = ModelInterface::getModel(xb_ifc_cfg);
+        xbi->print(std::cout);
 
-    // upload urdf to internal params (used for safety limits)
-    pm.setParam("/xbot/robot_description", xbi->getUrdfString());
-    pm.setParam<urdf::ModelInterface>("/xbot/urdf_model", *xbi->getUrdf());
+        // upload urdf to internal params (used for safety limits)
+        pm.setParam("/xbot/robot_description", xbi->getUrdfString());
+        pm.setParam<urdf::ModelInterface>("/xbot/urdf_model", *xbi->getUrdf());
+
+    }
 
     // construct joints
     auto joint_names = response["joint_names"].as<std::vector<std::string>>();
@@ -126,25 +131,65 @@ XBot::Hal::ZmqDeviceContainer::ZmqDeviceContainer(std::vector<DeviceInfo> devinf
         j.jinfo("added joint '{}'", jname);
     }
 
+    chrono::simulated_clock::enable_sim_time(true);
+
+    // thread for reading sim state and setting sim time
+    _recv_thread = std::make_unique<thread>([this]()
+    {
+        this_thread::set_name("zmq_hal_thread");
+
+        bool time_initialized = false;
+
+        while(_recv_thread_run.load())
+        {
+            // wait for message
+            std::string response_str(40960, '\0');
+
+            if(!recv_string(response_str, true))
+            {
+                continue;
+            }
+
+            // keep only most recent
+            while(recv_string(response_str, false))
+            {
+
+            }
+
+            // parse yaml
+            auto response = YAML::Load(response_str);
+
+            // handle simulation time
+            double time = response["time"].as<double>();
+
+            if(!time_initialized)
+            {
+                time_initialized = true;
+                chrono::simulated_clock::initialize(std::chrono::nanoseconds(int64_t(time*1e9)));
+            }
+
+            chrono::simulated_clock::set_time(std::chrono::nanoseconds(int64_t(time*1e9)));
+
+            // set response
+            _recv_yaml.set_value(response);
+        }
+
+        chrono::simulated_clock::enable_sim_time(false);
+    });
+
 }
 
 bool XBot::Hal::ZmqDeviceContainer::sense_all()
 {
 
-    // wait for message
-    std::string response_str(40960, '\0');
-
-    if(!recv_string(response_str, false))
+    if(!_recv_yaml.isValid())
     {
         return false;
     }
 
-    while(recv_string(response_str, false))
-    {
-        // keep only most recent
-    }
-
-    auto response = YAML::Load(response_str);
+    YAML::Node response;
+    _recv_yaml.get_value(response);
+    _recv_yaml.clear();
 
     auto type = response["type"].as<std::string>();
 
@@ -197,11 +242,15 @@ bool XBot::Hal::ZmqDeviceContainer::move_all()
     auto dq = YAML::Node(YAML::NodeType::Sequence);
     command_msg["dq"] = dq;
 
+    auto tau = YAML::Node(YAML::NodeType::Sequence);
+    command_msg["tau"] = tau;
+
     for(auto& j : _joints)
     {
         auto& tx = j->tx();
         q.push_back(tx.pos_ref);
         dq.push_back(tx.vel_ref);
+        tau.push_back(tx.tor_ref);
     }
 
     YAML::Emitter out;
@@ -249,6 +298,12 @@ bool XBot::Hal::ZmqDeviceContainer::recv_string(std::string &msg, bool blocking)
     {
         return false;
     }
+}
+
+XBot::Hal::ZmqDeviceContainer::~ZmqDeviceContainer()
+{
+    _recv_thread_run = false;
+    _recv_thread->join();
 }
 
 

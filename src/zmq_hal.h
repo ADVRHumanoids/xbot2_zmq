@@ -6,6 +6,7 @@
 #include <xbot2/ipc/pipe.h>
 #include <sys/un.h>
 
+
 namespace XBot {
 namespace Hal {
 
@@ -54,7 +55,21 @@ public:
     bool send_string(const std::string& msg);
     bool recv_string(std::string& msg, bool blocking = true);
 
+    ~ZmqDeviceContainer();
+
 private:
+
+    struct YamlParameter : public Parameter<YAML::Node>
+    {
+        YamlParameter(const std::string& name):
+            Parameter(name)
+        {}
+
+        void clear()
+        {
+            _valid = false;
+        }
+    };
 
     // socket
     int _socket_fd;
@@ -63,6 +78,13 @@ private:
 
     // devs
     std::vector<JointDriver::Ptr> _joints;
+
+    // recv thread
+    std::unique_ptr<thread> _recv_thread;
+    std::atomic_bool _recv_thread_run{true};
+
+    // thread-safe yaml
+    YamlParameter _recv_yaml;
 
 
 };
