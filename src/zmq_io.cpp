@@ -54,6 +54,11 @@ void ZmqIO::publish_js()
     repeated_field = js_msg->mutable_motvel();
     repeated_field->Clear();
     repeated_field->Add(buffer.data(), buffer.data() + buffer.size());
+
+    _robot->getVelocityReferenceFeedback(buffer);
+    repeated_field = js_msg->mutable_velref();
+    repeated_field->Clear();
+    repeated_field->Add(buffer.data(), buffer.data() + buffer.size());
     
     _robot->getJointEffort(buffer);
     repeated_field = js_msg->mutable_tor();
