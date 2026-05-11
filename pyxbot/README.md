@@ -3,9 +3,9 @@
 You can install with:
 
 ```
-pip install git+ssh://git@github.com/ADVRHumanoids/pyxbot.git
+uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-devsubdirectory=pyxbot
 ```
 
-You will need to have the correct zmq_io running on Xbot (https://github.com/ADVRHumanoids/xbot2_zmq/tree/crzz-dev)
+You will need to have the correct zmq_io running on Xbot [xbot2_zmq](../README.md)
 
 You can find an example of some basic usage in src/pyxbot/example.py 
