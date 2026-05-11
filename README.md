@@ -29,7 +29,7 @@ A python interface is available as a pip-installable package in the folder pyxbo
 You can install it with:
 
 ```
-uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-devsubdirectory=pyxbot
+uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-dev#subdirectory=pyxbot
 ```
 
 You can find more info in the package [README](pyxbot/README.md)
