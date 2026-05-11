@@ -6,7 +6,7 @@ using namespace XBot;
 bool ZmqIO::on_initialize() 
 {
     // bind publisher
-    auto raw_pub_bind_addr = "tcp://*:5559";
+    std::string raw_pub_bind_addr = "tcp://*:5559";
     getParam("~raw_pub_bind_addr", raw_pub_bind_addr);
     jinfo("Binding RAW PUB socket to {}", raw_pub_bind_addr);
 
@@ -15,7 +15,7 @@ bool ZmqIO::on_initialize()
     raw_publisher->bind(raw_pub_bind_addr);
 
     // bind command subscriber
-    auto cmd_sub_addr = "tcp://*:5558";
+    std::string cmd_sub_addr = "tcp://*:5558";
     getParam("~cmd_sub_addr", cmd_sub_addr);
     jinfo("Binding CMD socket to {}", cmd_sub_addr);
     cmd_subscriber = std::make_unique<zmq::socket_t>(*context, ZMQ_SUB);
@@ -24,7 +24,7 @@ bool ZmqIO::on_initialize()
     cmd_subscriber->set(zmq::sockopt::conflate, 1);
 
     // add REP socket for request/response
-    auto rep_bind_addr = "tcp://*:5557";
+    std::string rep_bind_addr = "tcp://*:5557";
     getParam("~rep_bind_addr", rep_bind_addr);
     jinfo("Binding REP socket to {}", rep_bind_addr);
     req_resp_socket = std::make_unique<zmq::socket_t>(*context, ZMQ_REP);

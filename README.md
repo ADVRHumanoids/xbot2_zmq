@@ -17,10 +17,22 @@ zmq_io:
   thread: nrt_main
   parameters:
     autostart: true
+    raw_pub_bind_addr: tcp://*:5559
+    cmd_sub_addr: tcp://*:5558
+    rep_bind_addr: tcp://*:5557
 ```
 
 
 ## Python interface
 
-A python interface is available at [pyxbot](https://github.com/ADVRHumanoids/pyxbot).
+A python interface is available as a pip-installable package in the folder pyxbot.
+You can install it with:
+
+```
+pip install git+ssh://git@github.com/ADVRHumanoids/xbot2_zmq/pyxbot
+```
+
+You can find more info in the package [README](pyxbot/README.md)
+
+
 

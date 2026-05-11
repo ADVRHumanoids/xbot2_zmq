@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyxbot"
+version = "0.0.1"
+authors = [
+  { name="Carlo Rizzardo", email="cr.git.mail@gmail.com" },
+]
+description = "A minimal python package for XBot2"
+readme = "README.md"
+requires-python = ">=3.8.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Linux",
+]
+
+dependencies = [
+    "pyzmq>=21.0.0",
+    "pyyaml>=6.0.2",
+    "numpy>=2.0.0",
+    "scipy>=1.8.0",
+    "betterproto2==0.9.1"
+]
+
