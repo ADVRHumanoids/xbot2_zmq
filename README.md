@@ -35,4 +35,9 @@ uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-dev#subdi
 You can find more info in the package [README](pyxbot/README.md)
 
 
+## Installation
+
+You can use the build script build_and_install_systemwide.sh to build and install, you can pass a
+path with --install-dir to specify the installation folder.
+
 
