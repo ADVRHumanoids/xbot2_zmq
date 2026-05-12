@@ -1,4 +1,12 @@
 #include "zmq_io.h"
+#include <time.h>
+#include <cstdint>
+
+uint64_t monotonic_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts); // Use this specific clock to try to use the same time here and in C++, so at least on the same machine things should match
+    return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL + ts.tv_nsec;
+}
 
 using namespace XBot;
 
@@ -345,9 +353,10 @@ void ZmqIO::readToMat(const IntType* data, size_t byte_size, Eigen::Ref<Eigen::M
 
 /**
  * Receives a command message in the raw bytes format, parses it, and applies the commands to the robot's joints. The expected command message format is as follows:
- * - A message sequence number (seq) as a 32-bit integer.                               1 x int32
- * - A timestamp (stamp) as a 64-bit double.                                            1 x float64
- * - The number of commanded joints (joints_num) as a 32-bit integer.                   1 x int32
+ * - A message sequence number (seq) as a 32-bit integer.                               1 x uint32
+ * - A timestamp (stamp_ns) as a 64-bit unsigned integer.                               1 x uint64
+ * - The number of commanded joints (joints_num) as a 32-bit integer.                   1 x uint32
+ * - Client session ID                                                                  1 x uint64
  * - Then we have a list of the id of the commanded joints, as integers (joint_ids).    joints_num x int32
  * - Then we have a matrix of position, velocity, effort, stiffness and damping
  *   references (joints_pvesd), as doubles, in row-major order.                         joints_num x 5 x float64
@@ -362,16 +371,20 @@ void ZmqIO::recv_cmd_v3()
     {
         try
         {
-            size_t header_size = sizeof(uint32_t) + sizeof(DoubleType) + sizeof(uint32_t);
+            size_t header_size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint64_t);
             if (cmd.size() < header_size)
             {
                 jerror("invalid command size: expected at least {}, got {}, SKIPPING COMMAND.", header_size, cmd.size());
                 return;
             }
             const char* ptr = static_cast<const char*>(cmd.data());
-            uint32_t seq            = *reinterpret_cast<const uint32_t*>(ptr);
-            DoubleType stamp        = *reinterpret_cast<const DoubleType*>(ptr + sizeof(uint32_t));
-            uint32_t cmd_joints_num = *reinterpret_cast<const uint32_t*>(ptr + sizeof(uint32_t) + sizeof(DoubleType));
+            uint32_t seq               = *reinterpret_cast<const uint32_t*>(ptr);
+            uint64_t stamp_ns          = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t));
+            uint32_t cmd_joints_num    = *reinterpret_cast<const uint32_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t));
+            uint64_t client_session_id = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
+
+            uint64_t now_ns = monotonic_ns();
+            _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)));
 
             size_t joint_ids_size    = cmd_joints_num * sizeof(int32_t);
             size_t joints_pvesd_size = cmd_joints_num * 5 * sizeof(DoubleType);

@@ -99,6 +99,7 @@ class XbotZmqClient:
         self._last_imu_state_arr : np.ndarray = None
         self._imu_states : dict[str,np.ndarray] = {}
         self._floating_base = True
+        self._client_session_id = np.array([np.random.randint(0, np.iinfo(np.uint64).max, dtype=np.uint64)], dtype=np.uint64)
 
     def start(self) -> "XbotZmqClient":
         self._request_reply_url = f"tcp://{self._remote_ip}:{self._remote_port}"
@@ -241,15 +242,20 @@ class XbotZmqClient:
                     break # no data available
 
 
-    def _build_command_raw(self, cmd: JointsCommand, stamp: float) -> bytes:
+    def _build_command_raw(self) -> bytes:
         """Build a raw bytes command following the recv_cmd_v3 format:
-          - seq         : 1 x int32
-          - stamp       : 1 x float64  (seconds since epoch)
-          - joints_num  : 1 x int32
-          - joint_ids   : joints_num x int32  (indices into the server's joint list)
-          - pvesd       : joints_num x 5 x float64, row-major
-          - ctrl_mode   : joints_num x int32
+          - seq                 : 1 x uint32
+          - stamp_ns            : 1 x uint64  (nanoseconds since epoch)
+          - joints_num          : 1 x uint32
+          - client_session_id   : 1 x uint64
+          - joint_ids           : joints_num x int32  (indices into the server's joint list)
+          - pvesd               : joints_num x 5 x float64, row-major
+          - ctrl_mode           : joints_num x int32
         """
+        
+        cmd = self._next_joint_cmd
+        stamp_ns = self._cmd_stamp_ns
+
         if cmd.pvesd.shape != (self._joints_num, 5):
             raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
         if cmd.ctrl_mode.shape != (self._joints_num, 1):
@@ -258,10 +264,11 @@ class XbotZmqClient:
         jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
         joints_num = len(jnames)
 
-        seq_arr = np.array([self._cmd_seq], dtype=np.int32, order='C')
-        stamp_arr = np.array([stamp], dtype=np.float64, order='C')
-        joints_num_arr = np.array([joints_num], dtype=np.int32, order='C')
-        joint_ids = np.array([self._joint_names_to_idx[n] for n in jnames], dtype=np.int32, order='C')
+        seq_arr = np.array([self._cmd_seq], dtype=np.uint32, order='C')
+        stamp_arr = np.array([stamp_ns], dtype=np.uint64, order='C') # convert seconds to nanoseconds
+        joints_num_arr = np.array([joints_num], dtype=np.uint32, order='C')
+        client_session_id_arr = self._client_session_id
+        joint_ids = np.array([self._joint_names_to_idx[n] for n in jnames], dtype=np.uint32, order='C')
         if self._floating_base:
             joint_ids = joint_ids + 1 # shift by one to account for the floating base joint at index 0
         pvesd = cmd.pvesd.astype(np.float64, order='C')
@@ -269,6 +276,7 @@ class XbotZmqClient:
         return (  seq_arr.tobytes()
                 + stamp_arr.tobytes()
                 + joints_num_arr.tobytes()
+                + client_session_id_arr.tobytes()
                 + joint_ids.tobytes()
                 + pvesd.tobytes()
                 + ctrl.tobytes())
@@ -295,7 +303,7 @@ class XbotZmqClient:
         # msg_str = cmd_msg.SerializeToString()
         # self._out_cmd_socket.send(msg_str)
 
-        self._out_cmd_socket.send(self._build_command_raw(self._next_joint_cmd, time.time()))
+        self._out_cmd_socket.send(self._build_command_raw())
         self._cmd_seq += 1
 
 
@@ -308,6 +316,7 @@ class XbotZmqClient:
     def set_command_v2(self,  cmd : JointsCommand):
         """Set the next joint command to be sent to the robot"""
         self._next_joint_cmd = cmd
+        self._cmd_stamp_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC) # Use this specific clock to try to use the same time here and in C++, so at least on the same machine things should match
 
     def get_joints_state(self, joints : List[str] | None = None) -> JointState:
         """Get the last sensed joint state from the robot"""

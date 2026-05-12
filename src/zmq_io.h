@@ -1,5 +1,8 @@
 #include <xbot2/rt_plugin/control_plugin.h>
 #include <zmq.hpp>
+#include <deque>
+#include <map>
+#include <cmath>
 
 typedef double DoubleType;
 typedef int IntType;
@@ -9,6 +12,32 @@ static_assert(sizeof(IntType) == 4, "IntType is not 32 bits");
 
 namespace XBot {
 
+struct ClientDelayStats {
+    static constexpr size_t WINDOW = 100;
+    std::array<int64_t, WINDOW> delays_ns{};
+    size_t head = 0;
+    size_t count = 0;
+    int64_t sum = 0;
+    double avg_delay_ns = 0.0;
+    double jitter_ns = 0.0;
+
+    void update(int64_t delay_ns) {
+        sum -= delays_ns[head];  // subtract slot being overwritten (0 until buffer is full)
+        delays_ns[head] = delay_ns;
+        sum += delay_ns;
+        head = (head + 1) % WINDOW;
+        if (count < WINDOW)
+            ++count;
+        avg_delay_ns = sum / static_cast<double>(count);
+        double var = 0.0;
+        for (size_t i = 0; i < count; ++i)
+        {
+            double diff = delays_ns[i] - avg_delay_ns;
+            var += diff * diff;
+        }
+        jitter_ns = std::sqrt(var / static_cast<double>(count));
+    }
+};
 
 class ZmqIO : public ControlPlugin {
 
@@ -47,6 +76,8 @@ private:
     JointNameMap jmap;
 
     chrono::steady_clock::time_point cmd_timeout;
+
+    std::map<uint64_t, ClientDelayStats> _client_delay_stats;
 
 };
 
