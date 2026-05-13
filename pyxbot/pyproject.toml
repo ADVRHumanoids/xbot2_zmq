@@ -21,7 +21,6 @@ dependencies = [
     "pyzmq>=21.0.0",
     "pyyaml>=6.0.2",
     "numpy>=2.0.0",
-    "scipy>=1.8.0",
-    "betterproto2==0.9.1"
+    "scipy>=1.8.0"
 ]
 
