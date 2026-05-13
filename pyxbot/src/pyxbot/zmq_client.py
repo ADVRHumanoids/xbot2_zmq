@@ -82,15 +82,25 @@ class JointState():
                 f"           eff_ref={self.eff_ref})")
 
 class XbotZmqClient:
-    def __init__(self,  remote_ip : str ='localhost',
-                        remote_port : int =5557,
-                        remote_joint_state_port : int =5559,
-                        remote_cmd_port : int =5558):
+    def __init__(self,  protocol : str = 'ipc',
+                        remote_ip : str = 'localhost',
+                        tcp_service_port : int = 5557,
+                        tcp_pub_port : int = 5559,
+                        tcp_cmd_port : int = 5558,
+                        ipc_pub_path : str = '/tmp/xbot2_zmq_pub.ipc',
+                        ipc_cmd_path : str = '/tmp/xbot2_zmq_cmd.ipc',
+                        ipc_service_path : str = '/tmp/xbot2_zmq_rep.ipc'):
 
+        if protocol not in ('tcp', 'ipc'):
+            raise ValueError(f"Unknown protocol '{protocol}', expected 'tcp' or 'ipc'")
+        self._protocol = protocol
         self._remote_ip = remote_ip
-        self._remote_port = remote_port
-        self._remote_joint_state_port = remote_joint_state_port
-        self._remote_cmd_port = remote_cmd_port
+        self._tcp_service_port = tcp_service_port
+        self._tcp_pub_port = tcp_pub_port
+        self._tcp_cmd_port = tcp_cmd_port
+        self._ipc_pub_path = ipc_pub_path
+        self._ipc_cmd_path = ipc_cmd_path
+        self._ipc_rep_path = ipc_service_path
         self._next_joint_cmd = JointsCommand(joint_names=[], pvesd=np.zeros((0,5)), ctrl_mode=np.zeros((0,1), dtype=np.int32))
         self._last_msg_seq = 0
         self._last_msg_stamp = 0.0
@@ -102,9 +112,14 @@ class XbotZmqClient:
         self._client_session_id = np.array([np.random.randint(0, np.iinfo(np.uint64).max, dtype=np.uint64)], dtype=np.uint64)
 
     def start(self) -> "XbotZmqClient":
-        self._request_reply_url = f"tcp://{self._remote_ip}:{self._remote_port}"
-        self._jointstates_url = f"tcp://{self._remote_ip}:{self._remote_joint_state_port}"
-        self._out_cmd_url = f"tcp://{self._remote_ip}:{self._remote_cmd_port}"
+        if self._protocol == 'tcp':
+            self._request_reply_url = f"tcp://{self._remote_ip}:{self._tcp_service_port}"
+            self._jointstates_url   = f"tcp://{self._remote_ip}:{self._tcp_pub_port}"
+            self._out_cmd_url       = f"tcp://{self._remote_ip}:{self._tcp_cmd_port}"
+        else:
+            self._request_reply_url = f"ipc://{self._ipc_rep_path}"
+            self._jointstates_url   = f"ipc://{self._ipc_pub_path}"
+            self._out_cmd_url       = f"ipc://{self._ipc_cmd_path}"
         context = zmq.Context()
         self._request_reply_socket = context.socket(zmq.REQ)
         self._request_reply_socket.connect(self._request_reply_url)
@@ -304,6 +319,8 @@ class XbotZmqClient:
         # self._out_cmd_socket.send(msg_str)
 
         self._out_cmd_socket.send(self._build_command_raw())
+        t = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        # print(f"Sent command seq {self._cmd_seq} with delay {(t-self._cmd_stamp_ns)/1e6} ms")
         self._cmd_seq += 1
 
 

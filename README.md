@@ -17,9 +17,14 @@ zmq_io:
   thread: nrt_main
   parameters:
     autostart: true
-    raw_pub_bind_addr: tcp://*:5559
-    cmd_sub_addr: tcp://*:5558
-    rep_bind_addr: tcp://*:5557
+    protocol: ipc # either tcp or ipc
+    tcp_state_port: 5559
+    tcp_cmd_port: 5558
+    tcp_service_port: 5557 
+    ipc_state_port: /tmp/xbot2_zmq_pub.ipc
+    ipc_cmd_port: /tmp/xbot2_zmq_cmd.ipc
+    ipc_service_port: /tmp/xbot2_zmq_rep.ipc
+    
 ```
 
 

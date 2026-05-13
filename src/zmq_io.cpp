@@ -10,33 +10,97 @@ uint64_t monotonic_ns() {
 
 using namespace XBot;
 
+void ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
+    uint64_t now_ns = monotonic_ns();
+    int64_t ipt_ns = last_update_ns == 0 ? 0 : static_cast<int64_t>(now_ns - last_update_ns);
+    last_update_ns = now_ns;
+    int packets_since_last = seq - last_seq;
+    if (packets_since_last > 1)
+        std::cout << "Warning: Missed " << packets_since_last - 1 << " packets from client." << std::endl;
+    last_seq = seq;
 
-bool ZmqIO::on_initialize() 
+    sum -= delays_ns[head];
+    ipt_sum -= inter_packet_ns[head];
+    delays_ns[head] = delay_ns;
+    inter_packet_ns[head] = ipt_ns;
+    sum += delay_ns;
+    ipt_sum += ipt_ns;
+    head = (head + 1) % WINDOW;
+    if (count < WINDOW)
+        ++count;
+
+    avg_delay_ns = sum / static_cast<double>(count);
+    avg_inter_packet_ns = ipt_sum / static_cast<double>(count);
+
+    double var_delay = 0.0, var_ipt = 0.0;
+    for (size_t i = 0; i < count; ++i)
+    {
+        double dd = delays_ns[i] - avg_delay_ns;
+        var_delay += dd * dd;
+        double di = inter_packet_ns[i] - avg_inter_packet_ns;
+        var_ipt += di * di;
+    }
+    jitter_ns = std::sqrt(var_delay / static_cast<double>(count));
+    inter_packet_jitter_ns = std::sqrt(var_ipt / static_cast<double>(count));
+
+    if (std::abs(delay_ns - avg_delay_ns) > 3 * jitter_ns)
+        std::cout << "Abnormal client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms, pkgs since last: " << packets_since_last << ")" << std::endl;
+    if (last_update_ns != 0 && std::abs(ipt_ns - avg_inter_packet_ns) > 3 * inter_packet_jitter_ns)
+        std::cout << "Abnormal inter-packet time: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms)" << std::endl;
+    // std::cout << "Client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms), inter-packet: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms), skipped: " << packets_since_last - 1 << std::endl;
+}
+
+
+bool ZmqIO::on_initialize()
 {
-    // bind publisher
-    std::string raw_pub_bind_addr = "tcp://*:5559";
-    getParam("~raw_pub_bind_addr", raw_pub_bind_addr);
-    jinfo("Binding RAW PUB socket to {}", raw_pub_bind_addr);
+    std::string protocol = "ipc";
+    getParam("~protocol", protocol);
+
+    std::string pub_bind_addr, cmd_sub_addr, service_bind_addr;
+
+    if (protocol == "tcp")
+    {
+        int state_port = 5559, cmd_port = 5558, service_port = 5557;
+        getParam("~tcp_state_port", state_port);
+        getParam("~tcp_cmd_port", cmd_port);
+        getParam("~tcp_service_port", service_port);
+        pub_bind_addr = "tcp://*:" + std::to_string(state_port);
+        cmd_sub_addr      = "tcp://*:" + std::to_string(cmd_port);
+        service_bind_addr     = "tcp://*:" + std::to_string(service_port);
+    }
+    else if (protocol == "ipc")
+    {
+        std::string pub_path = "/tmp/xbot2_zmq_pub.ipc";
+        std::string cmd_path = "/tmp/xbot2_zmq_cmd.ipc";
+        std::string rep_path = "/tmp/xbot2_zmq_rep.ipc";
+        getParam("~ipc_state_path", pub_path);
+        getParam("~ipc_cmd_path", cmd_path);
+        getParam("~ipc_service_path", rep_path);
+        pub_bind_addr     = "ipc://" + pub_path;
+        cmd_sub_addr      = "ipc://" + cmd_path;
+        service_bind_addr = "ipc://" + rep_path;
+    }
+    else
+    {
+        jerror("Unknown protocol '{}', expected 'tcp' or 'ipc'", protocol);
+        return false;
+    }
 
     context = std::make_unique<zmq::context_t>(1);
-    raw_publisher = std::make_unique<zmq::socket_t>(*context, ZMQ_PUB);
-    raw_publisher->bind(raw_pub_bind_addr);
 
-    // bind command subscriber
-    std::string cmd_sub_addr = "tcp://*:5558";
-    getParam("~cmd_sub_addr", cmd_sub_addr);
+    jinfo("Binding RAW PUB socket to {}", pub_bind_addr);
+    raw_publisher = std::make_unique<zmq::socket_t>(*context, ZMQ_PUB);
+    raw_publisher->bind(pub_bind_addr);
+
     jinfo("Binding CMD socket to {}", cmd_sub_addr);
     cmd_subscriber = std::make_unique<zmq::socket_t>(*context, ZMQ_SUB);
     cmd_subscriber->bind(cmd_sub_addr);
     cmd_subscriber->set(zmq::sockopt::subscribe, "");
     cmd_subscriber->set(zmq::sockopt::conflate, 1);
 
-    // add REP socket for request/response
-    std::string rep_bind_addr = "tcp://*:5557";
-    getParam("~rep_bind_addr", rep_bind_addr);
-    jinfo("Binding REP socket to {}", rep_bind_addr);
+    jinfo("Binding REP socket to {}", service_bind_addr);
     req_resp_socket = std::make_unique<zmq::socket_t>(*context, ZMQ_REP);
-    req_resp_socket->bind(rep_bind_addr);
+    req_resp_socket->bind(service_bind_addr);
 
     return true;
 }
@@ -384,7 +448,7 @@ void ZmqIO::recv_cmd_v3()
             uint64_t client_session_id = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
 
             uint64_t now_ns = monotonic_ns();
-            _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)));
+            _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)), seq);
 
             size_t joint_ids_size    = cmd_joints_num * sizeof(int32_t);
             size_t joints_pvesd_size = cmd_joints_num * 5 * sizeof(DoubleType);

@@ -15,28 +15,19 @@ namespace XBot {
 struct ClientDelayStats {
     static constexpr size_t WINDOW = 100;
     std::array<int64_t, WINDOW> delays_ns{};
+    std::array<int64_t, WINDOW> inter_packet_ns{};
     size_t head = 0;
     size_t count = 0;
     int64_t sum = 0;
+    int64_t ipt_sum = 0;
     double avg_delay_ns = 0.0;
     double jitter_ns = 0.0;
+    double avg_inter_packet_ns = 0.0;
+    double inter_packet_jitter_ns = 0.0;
+    uint32_t last_seq = 0;
+    uint64_t last_update_ns = 0;
 
-    void update(int64_t delay_ns) {
-        sum -= delays_ns[head];  // subtract slot being overwritten (0 until buffer is full)
-        delays_ns[head] = delay_ns;
-        sum += delay_ns;
-        head = (head + 1) % WINDOW;
-        if (count < WINDOW)
-            ++count;
-        avg_delay_ns = sum / static_cast<double>(count);
-        double var = 0.0;
-        for (size_t i = 0; i < count; ++i)
-        {
-            double diff = delays_ns[i] - avg_delay_ns;
-            var += diff * diff;
-        }
-        jitter_ns = std::sqrt(var / static_cast<double>(count));
-    }
+    void update(int64_t delay_ns, uint32_t seq);
 };
 
 class ZmqIO : public ControlPlugin {
