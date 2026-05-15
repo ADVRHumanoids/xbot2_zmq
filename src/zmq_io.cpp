@@ -43,11 +43,28 @@ void ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
     jitter_ns = std::sqrt(var_delay / static_cast<double>(count));
     inter_packet_jitter_ns = std::sqrt(var_ipt / static_cast<double>(count));
 
-    if (std::abs(delay_ns - avg_delay_ns) > 3 * jitter_ns)
+    double max_std_deviation = 5;
+    if (std::abs(delay_ns - avg_delay_ns) > max_std_deviation * jitter_ns)
         std::cout << "Abnormal client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms, pkgs since last: " << packets_since_last << ")" << std::endl;
-    if (last_update_ns != 0 && std::abs(ipt_ns - avg_inter_packet_ns) > 3 * inter_packet_jitter_ns)
+    if (last_update_ns != 0 && std::abs(ipt_ns - avg_inter_packet_ns) > max_std_deviation * inter_packet_jitter_ns)
         std::cout << "Abnormal inter-packet time: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms)" << std::endl;
     // std::cout << "Client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms), inter-packet: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms), skipped: " << packets_since_last - 1 << std::endl;
+}
+
+void ClientDelayStats::reset(uint32_t initial_seq)
+{   
+    delays_ns.fill(0);
+    inter_packet_ns.fill(0);
+    head = 0;
+    count = 0;
+    sum = 0;
+    ipt_sum = 0;
+    avg_delay_ns = 0.0;
+    jitter_ns = 0.0;
+    avg_inter_packet_ns = 0.0;
+    inter_packet_jitter_ns = 0.0;
+    last_seq = initial_seq;
+    last_update_ns = 0;
 }
 
 
@@ -448,7 +465,10 @@ void ZmqIO::recv_cmd_v3()
             uint64_t client_session_id = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
 
             uint64_t now_ns = monotonic_ns();
-            _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)), seq);
+            if(cmd_consecutive_steps > 0)
+                _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)), seq);
+            else
+                _client_delay_stats[client_session_id].reset(seq);
 
             size_t joint_ids_size    = cmd_joints_num * sizeof(int32_t);
             size_t joints_pvesd_size = cmd_joints_num * 5 * sizeof(DoubleType);
@@ -506,6 +526,7 @@ void ZmqIO::recv_cmd_v3()
             }
 
             cmd_timeout = chrono::steady_clock::now() + 1s;
+            cmd_consecutive_steps++;
 
             _robot->move();
         }
@@ -522,6 +543,7 @@ void ZmqIO::recv_cmd_v3()
         jinfo("timeout expired, releasing resources");
         _robot->releaseResources();
         cmd_timeout = decltype(cmd_timeout)();
+        cmd_consecutive_steps = 0;
     }
 
 }

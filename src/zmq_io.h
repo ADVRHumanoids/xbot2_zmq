@@ -28,6 +28,8 @@ struct ClientDelayStats {
     uint64_t last_update_ns = 0;
 
     void update(int64_t delay_ns, uint32_t seq);
+
+    void reset(uint32_t initial_seq);
 };
 
 class ZmqIO : public ControlPlugin {
@@ -67,6 +69,7 @@ private:
     JointNameMap jmap;
 
     chrono::steady_clock::time_point cmd_timeout;
+    long cmd_consecutive_steps = 0;
 
     std::map<uint64_t, ClientDelayStats> _client_delay_stats;
 
