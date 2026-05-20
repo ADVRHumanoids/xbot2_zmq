@@ -7,7 +7,7 @@ from typing import List, Sequence
 import pprint
 
 from dataclasses import dataclass
-
+import gc
 
 @dataclass
 class JointsCommand():
@@ -396,3 +396,20 @@ class XbotZmqClient:
         imu_state = self._last_imu_state_arr
         imu_idxs = np.array([imu_names.index(n) for n in req_imu_names])
         return imu_state[imu_idxs, 6:10] # quaternion in xyzw order
+    
+    def setup_gc_for_control_loop(self, disable_fully : bool = False):
+        """ Sets up garbage collection to minimize latencies introduced by the garbage collector.
+            You can cal lthis method at the beginning of your control loop, and call it again every time you restart the loop.
+            It will do the following:
+            - It first enables garbage collection if it was disabled
+            - Then it unfreezes whatever is already frozen, to make it available for collection.
+            - Then it performs a full garbage collection to clean up everything that needs to be collected.
+            - Then it freezes all currently allocated objects, so they are ignored in future collections, to make gc calls faster.
+            - Finally, if disable_fully is True, it disables garbage collection completely. This can lead to memory leaks if not used carefully.
+        """
+        gc.enable() # enable garbage collection if it was disabled, to be sure
+        gc.unfreeze() # unfreezes whatever is already frozen
+        gc.collect(2) # collects whatever nedds to be collected
+        gc.freeze() # freeze currently allocated objects, so it is ignored in future collections, to make the fast
+        if disable_fully:
+            gc.disable()
