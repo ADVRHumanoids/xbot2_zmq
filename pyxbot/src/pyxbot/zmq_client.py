@@ -1,5 +1,5 @@
 import zmq
-import yaml 
+import yaml
 import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -11,6 +11,19 @@ import gc
 
 @dataclass
 class JointsCommand():
+    """Command structure holding position/velocity/effort/stiffness/damping references for a set of joints.
+
+    Typical usage: construct a ``JointsCommand`` and pass it to :meth:`XbotZmqClient.send_command`.
+
+    Attributes
+    ----------
+    pvesd : np.ndarray
+        Array of shape (N, 5). Each row is [pos_ref, vel_ref, tor_ref, stiffness, damping] for one joint.
+    ctrl_mode : np.ndarray
+        Integer array of shape (N, 1). Each element is the control mode for one joint.
+    joint_names : list of str
+        Ordered list of N joint names corresponding to rows in ``pvesd`` and ``ctrl_mode``.
+    """
     pvesd : np.ndarray
     """ An array of shape (N, 5) where N is the number of joints. Each row contains [pos_ref, vel_ref, tor_ref, K, D] for a joint"""
     ctrl_mode : np.ndarray
@@ -19,24 +32,62 @@ class JointsCommand():
     """ A list of N joint names corresponding to the rows in pvesd """
 
 class JointState():
+    """Read-only view of the last received state for a subset of robot joints.
+
+    Returned by :meth:`XbotZmqClient.get_joints_state`. All properties return
+    views into the underlying NumPy array.
+
+    Properties
+    ----------
+    pos_joint, pos_motor : np.ndarray
+        Joint-side and motor-side position (rad or meters).
+    vel_joint, vel_motor : np.ndarray
+        Joint-side and motor-side velocity (rad/s or m/s).
+    eff : np.ndarray
+        Measured effort (Nm or N).
+    temperature_motor, temperature_driver : np.ndarray
+        Motor and driver temperatures (°C).
+    pos_ref : np.ndarray
+        Currently active position references.
+    vel_ref : np.ndarray
+        Currently active velocity references.
+    eff_ref : np.ndarray
+        Currently active effort references.
+    stiff : np.ndarray
+        Currently active stiffness gains.
+    damp : np.ndarray
+        Currently active damping gains.
+    """
     def __init__(self, ppvvettpvekd) -> None:
+        """
+        Parameters
+        ----------
+        ppvvettpvekd : np.ndarray
+            Raw state array of shape (N, 12). Column layout: pos_joint, pos_motor,
+            vel_joint, vel_motor, effort, temp_motor, temp_driver, pos_ref, vel_ref,
+            eff_ref, stiff, damp.
+        """
         self._joint_states_ppvvettpvekd = ppvvettpvekd
+        self._joint_states_ppvvettpvekd.flags.writeable = False
         self._pve_idx = np.array([0,3,4])
         self._pvesd_refs_idx = np.array([7,8,9,10,11])
 
     def data(self) -> np.ndarray:
+        """Return the full raw state array of shape (N, 12)."""
         return self._joint_states_ppvvettpvekd
 
     def pve(self) -> np.ndarray:
+        """Return columns [pos_joint, vel_motor, eff] as shape (N, 3)."""
         return self._joint_states_ppvvettpvekd[:, self._pve_idx]
-    
+
     def pvesd_refs(self) -> np.ndarray:
+        """Return reference columns [pos_ref, vel_ref, eff_ref, stiff, damp] as shape (N, 5)."""
         return self._joint_states_ppvvettpvekd[:, self._pvesd_refs_idx]
 
     @property
     def pos_joint(self) -> np.ndarray:
         # print(f"getting pos from buffer of size {self._joint_states_ppvvettpvekd.shape}")
-        return self._joint_states_ppvvettpvekd[:,0]    
+        return self._joint_states_ppvvettpvekd[:,0]
     @property
     def pos_motor(self) -> np.ndarray:
         return self._joint_states_ppvvettpvekd[:,1]
@@ -82,6 +133,38 @@ class JointState():
                 f"           eff_ref={self.eff_ref})")
 
 class XbotZmqClient:
+    """ZMQ-based client for communicating with an xbot2 robot.
+
+    Two transports are supported:
+
+    - ``'ipc'``: Unix domain sockets for same-machine communication (default).
+    - ``'tcp'``: TCP sockets for remote communication.
+
+    The typical workflow is:
+
+    1. Instantiate the client.
+    2. Call :meth:`start` to connect and fetch joint/IMU metadata from the server.
+    3. In a loop: call :meth:`sense` to update state, read state via
+       :meth:`get_joints_state` / ``getImu*``, build a :class:`JointsCommand`,
+       and send it with :meth:`send_command`.
+
+    Example::
+
+        client = XbotZmqClient(protocol='ipc').start()
+        joint_names = client.get_joint_names()
+        while True:
+            client.sense()
+            state = client.get_joints_state()
+            pvesd = np.zeros((len(joint_names), 5))
+            pvesd[:, 0] = state.pos_joint   # hold current position
+            pvesd[:, 3] = 500               # stiffness
+            pvesd[:, 4] = 10                # damping
+            client.send_command(JointsCommand(
+                pvesd=pvesd,
+                joint_names=joint_names,
+                ctrl_mode=np.full((len(joint_names), 1), 63, dtype=np.uint32),
+            ))
+    """
     def __init__(self,  protocol : str = 'ipc',
                         remote_ip : str = 'localhost',
                         tcp_service_port : int = 5557,
@@ -89,12 +172,36 @@ class XbotZmqClient:
                         tcp_cmd_port : int = 5558,
                         ipc_pub_path : str = '/tmp/xbot2_zmq_pub.ipc',
                         ipc_cmd_path : str = '/tmp/xbot2_zmq_cmd.ipc',
-                        ipc_service_path : str = '/tmp/xbot2_zmq_rep.ipc'):
+                        ipc_service_path : str = '/tmp/xbot2_zmq_rep.ipc',
+                        verbose : bool = False):
+        """ Initialize the client, call start() before using it.
 
+        Parameters
+        ----------
+        protocol : str
+            Transport to use: ``'ipc'`` (same machine) or ``'tcp'`` (remote).
+        remote_ip : str
+            IP address of the xbot2 server. Used only with ``protocol='tcp'``.
+        tcp_service_port : int
+            Port for the request-reply service socket (tcp only).
+        tcp_pub_port : int
+            Port for the joint-state publisher socket (tcp only).
+        tcp_cmd_port : int
+            Port for the command socket (tcp only).
+        ipc_pub_path : str
+            IPC socket path for joint-state publishing (ipc only).
+        ipc_cmd_path : str
+            IPC socket path for commands (ipc only).
+        ipc_service_path : str
+            IPC socket path for the request-reply service (ipc only).
+        verbose : bool
+            Print connection and discovery info to stdout.
+        """
         if protocol not in ('tcp', 'ipc'):
             raise ValueError(f"Unknown protocol '{protocol}', expected 'tcp' or 'ipc'")
         self._protocol = protocol
         self._remote_ip = remote_ip
+        self._verbose = verbose
         self._tcp_service_port = tcp_service_port
         self._tcp_pub_port = tcp_pub_port
         self._tcp_cmd_port = tcp_cmd_port
@@ -112,6 +219,17 @@ class XbotZmqClient:
         self._client_session_id = np.array([np.random.randint(0, np.iinfo(np.uint64).max, dtype=np.uint64)], dtype=np.uint64)
 
     def start(self) -> "XbotZmqClient":
+        """Connect to the xbot2 server and fetch joint/IMU metadata.
+
+        Opens the ZMQ sockets and queries the server for joint names, IMU names,
+        and the robot URDF. Must be called once before :meth:`sense`,
+        :meth:`get_joints_state`, or any command method.
+
+        Returns
+        -------
+        XbotZmqClient
+            ``self``, to allow chaining: ``client = XbotZmqClient().start()``.
+        """
         if self._protocol == 'tcp':
             self._request_reply_url = f"tcp://{self._remote_ip}:{self._tcp_service_port}"
             self._jointstates_url   = f"tcp://{self._remote_ip}:{self._tcp_pub_port}"
@@ -123,64 +241,88 @@ class XbotZmqClient:
         context = zmq.Context()
         self._request_reply_socket = context.socket(zmq.REQ)
         self._request_reply_socket.connect(self._request_reply_url)
-        print(f"Connected to request-reply socket at {self._request_reply_url}")
+        if self._verbose:
+            print(f"Connected to request-reply socket at {self._request_reply_url}")
 
         self._joint_names : List[str] = self._get_joint_names_remote()
         self._joints_num = len(self._joint_names)
         self._joint_names_to_idx = {name: idx for idx, name in enumerate(self._joint_names)}
         self._raw_joints_state_shape = (len(self._joint_names), 12) # fix this here, does not change anymore
-        print(f"Got joint names: {self._joint_names}")
+        if self._verbose:
+            print(f"Got joint names: {self._joint_names}")
 
         self._imu_names : List[str] = self._get_imu_names_remote()
         self._imus_num = len(self._imu_names)
         self._imu_names_to_idx = {name: idx for idx, name in enumerate(self._imu_names)}
         self._raw_imu_state_shape = (len(self._imu_names), 10) # fix this here, does not change anymore
-        print(f"Got IMU names: {self._imu_names}")
+        if self._verbose:
+            print(f"Got IMU names: {self._imu_names}")
 
         self._jointstates_socket = context.socket(zmq.SUB)
         self._jointstates_socket.connect(self._jointstates_url)
         self._jointstates_socket.subscribe("")  # Subscribe to all topics
         self._jointstates_socket.setsockopt(zmq.CONFLATE, 1)  # last msg only.
-        print(f"Connected to joint states socket at {self._jointstates_url}")
+        if self._verbose:
+            print(f"Connected to joint states socket at {self._jointstates_url}")
 
         self._out_cmd_socket = context.socket(zmq.PUB)
         self._out_cmd_socket.connect(self._out_cmd_url)
-        print(f"Connected to command socket at {self._out_cmd_url}")
+        if self._verbose:
+            print(f"Connected to command socket at {self._out_cmd_url}")
 
         self._urdf = self._get_urdf_remote()
         return self
 
     def _send_request(self, request : dict) -> dict:
+        """Send a YAML-encoded request dict over the REQ socket and return the parsed response."""
         self._request_reply_socket.send_string(yaml.dump(request))
         response_str = self._request_reply_socket.recv_string()
         response = yaml.safe_load(response_str)
         return response
 
     def _get_joint_names_remote(self):
+        """Fetch the ordered list of joint names from the server."""
         response = self._send_request({"type": "joint_names"})
         names = response["data"]
-        print(f"Received joint names from server: {names}")
         if self._floating_base:
             names = names[1:]  # Remove the floating base joint
         return names
 
     def _get_imu_names_remote(self):
+        """Fetch the ordered list of IMU names from the server."""
         response = self._send_request({"type": "imu_names"})
         return response["data"]
 
     def set_filter_frequency_hz(self, cutoff_freq, enabled=True):
+        """Set the server-side low-pass filter cutoff frequency for joint states.
+
+        Parameters
+        ----------
+        cutoff_freq : float
+            Cutoff frequency in Hz.
+        enabled : bool
+            Whether to enable the filter. Pass ``False`` to disable it.
+
+        Raises
+        ------
+        RuntimeError
+            If the server reports failure.
+        """
         resp = self._send_request({"type": "set_filter_frequency_hz", "enabled": enabled, "cutoff_hz": cutoff_freq})
         if not resp["success"]:
             raise RuntimeError("Failed to set filter frequency, reason: " + resp["message"])
-    
+
     def _get_urdf_remote(self) -> str:
+        """Fetch the robot URDF string from the server."""
         response = self._send_request({"type": "urdf"})
         return response["data"]
-    
+
     def get_urdf(self) -> str:
+        """Return the robot URDF string retrieved at startup."""
         return self._urdf
-    
+
     def get_joint_names(self):
+        """Return the ordered list of joint names as known to the server."""
         return self._joint_names.copy()
 
     # def _extract_arrs_proto(self, msg):
@@ -193,7 +335,7 @@ class XbotZmqClient:
     #         imu_state_arr = np.frombuffer(rx_msg.js.imu_linxyz_angxyz_quatsxyzw, dtype=np.float64).reshape(self._raw_imu_state_shape, order='C')
     #     return seq, stamp, joints_state_arr, imu_state_arr
 
-    def _extract_arrs_raw(self, msg):
+    def _extract_arrs_raw(self, msg : bytes):
         """ Extracts state data from a raw bytes message, which should follow the following format:
             - All data is in 64-bit double precision for floating-point values and 32-bit integers for integer values.
             - First integer is the sequence number (seq).
@@ -241,6 +383,23 @@ class XbotZmqClient:
 
 
     def sense(self, timeout_s : float = float("+inf")):
+        """Read the latest joint and IMU state from the robot.
+
+        Drains any queued messages and stores the result internally. Call this
+        at the top of every control-loop iteration before reading state via
+        :meth:`get_joints_state` or ``getImu*`` methods.
+
+        Parameters
+        ----------
+        timeout_s : float
+            How long to wait for a message before raising ``TimeoutError``.
+            Defaults to infinity (blocks until a message arrives).
+
+        Raises
+        ------
+        TimeoutError
+            If no message arrives within ``timeout_s`` seconds.
+        """
         msg = None
         t0 = time.monotonic()
         while msg is None:
@@ -249,7 +408,6 @@ class XbotZmqClient:
                     msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
                     # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                     self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
-                    
                 except zmq.Again:
                     # print("No joint state message available yet...")
                     if time.monotonic() - t0 > timeout_s:
@@ -258,7 +416,7 @@ class XbotZmqClient:
 
 
     def _build_command_raw(self) -> bytes:
-        """Build a raw bytes command following the recv_cmd_v3 format:
+        """Build a raw bytes command using the current client state and following the recv_cmd_v3 format:
           - seq                 : 1 x uint32
           - stamp_ns            : 1 x uint64  (nanoseconds since epoch)
           - joints_num          : 1 x uint32
@@ -267,7 +425,7 @@ class XbotZmqClient:
           - pvesd               : joints_num x 5 x float64, row-major
           - ctrl_mode           : joints_num x int32
         """
-        
+
         cmd = self._next_joint_cmd
         stamp_ns = self._cmd_stamp_ns
 
@@ -275,7 +433,7 @@ class XbotZmqClient:
             raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
         if cmd.ctrl_mode.shape != (self._joints_num, 1):
             raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(self._joints_num, 1)}")
-        
+
         jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
         joints_num = len(jnames)
 
@@ -296,23 +454,24 @@ class XbotZmqClient:
                 + pvesd.tobytes()
                 + ctrl.tobytes())
 
-    def _build_command_proto(self, cmd: JointsCommand):
-        if cmd.pvesd.shape != (self._joints_num, 5):
-            raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
-        if cmd.ctrl_mode.shape != (self._joints_num, 1):
-            raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(self._joints_num, 1)}")
-        
-        joint_cmd = proto_msgs.JointCommand()
-        jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
-        joint_cmd.name.extend(jnames)
-        # Let's be picky here with the inputs
-        joint_cmd.joints_pvesd = cmd.pvesd.astype(np.float64, order="C").tobytes()
-        joint_cmd.joints_ctrl = cmd.ctrl_mode.astype(np.int32, order="C").tobytes()
-        return joint_cmd
+    # def _build_command_proto(self, cmd: JointsCommand):
+    #     if cmd.pvesd.shape != (self._joints_num, 5):
+    #         raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
+    #     if cmd.ctrl_mode.shape != (self._joints_num, 1):
+    #         raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(self._joints_num, 1)}")
+
+    #     joint_cmd = proto_msgs.JointCommand()
+    #     jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
+    #     joint_cmd.name.extend(jnames)
+    #     # Let's be picky here with the inputs
+    #     joint_cmd.joints_pvesd = cmd.pvesd.astype(np.float64, order="C").tobytes()
+    #     joint_cmd.joints_ctrl = cmd.ctrl_mode.astype(np.int32, order="C").tobytes()
+    #     return joint_cmd
 
     def move(self):
-        """Send the next joint command to the robot"""
-        # cmd_msg =  proto_msgs.GenericRxMsg() 
+        """Send the next joint command to the robot. The command is set by calling :meth:`set_command`
+        You can also set and send in one call using :meth:`send_command`."""
+        # cmd_msg =  proto_msgs.GenericRxMsg()
         # cmd_msg.stamp = int(time.time() * 1e9)
         # cmd_msg.cmd = self._build_command_proto(self._next_joint_cmd)
         # msg_str = cmd_msg.SerializeToString()
@@ -325,18 +484,38 @@ class XbotZmqClient:
 
 
     def send_command(self, cmd : JointsCommand | None = None):
-        """Send the next joint command to the robot. If cmd is not None, set it as the next command before sending"""
+        """Send the next joint command to the robot. If cmd is not None, set it as the next command before sending.
+        If cmd is None this is equivalent to calling :meth:`move`.
+        If cmd is not None, then it will override commands set via :meth:`enableJoints`, :meth:`setPositionReference`, etc. """
         if cmd is not None:
-            self.set_command_v2(cmd)
+            self.set_command(cmd)
         self.move()
 
-    def set_command_v2(self,  cmd : JointsCommand):
-        """Set the next joint command to be sent to the robot"""
+    def set_command(self,  cmd : JointsCommand):
+        """Set the next joint command to be sent to the robot via :meth:`move` or :meth:`send_command`.
+        This does not send the command immediately.
+        This overrides commands set via :meth:`enableJoints`, :meth:`setPositionReference`, etc.
+
+        Parameters
+        ----------
+        cmd : JointsCommand
+            The joint command to set as the next command to be sent.
+        """
         self._next_joint_cmd = cmd
         self._cmd_stamp_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC) # Use this specific clock to try to use the same time here and in C++, so at least on the same machine things should match
 
     def get_joints_state(self, joints : List[str] | None = None) -> JointState:
-        """Get the last sensed joint state from the robot"""
+        """Get the last sensed joint state from the robot. Current joint state is updated by calling :meth:`sense`.
+
+        Parameters
+        ----------
+        joints : list of str, optional
+            Joint names to query. Defaults to all joints (None).
+        Returns
+        -------
+        JointState
+            The last sensed state for the requested joints.
+        """
         if joints is None:
             joints = self._joint_names
         tot_joints_num = len(self._joint_names)
@@ -348,64 +527,188 @@ class XbotZmqClient:
         return js
 
     def enableJoints(self, jnames: list):
+        """Configure the internal command to target the given joints with zero references.
+
+        Resets the next command to address only the specified joints, with all
+        references zeroed and control mode set to position (1). Call this once after
+        :meth:`start` to select which joints to command, then set references with
+        :meth:`setPositionReference` etc. before calling :meth:`send_command`.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the joints enabled by this method.
+
+        Parameters
+        ----------
+        jnames : list of str
+            Ordered list of joint names to enable. Must be a subset of
+            :meth:`get_joint_names`.
+        """
+        for j in jnames:
+            if j not in self._joint_names:
+                raise ValueError(f"Unknown joint name '{j}' in enableJoints, valid names are: {self._joint_names}")
         self._next_joint_cmd.joint_names = jnames
         self._next_joint_cmd.pvesd = np.zeros((len(jnames), 5))
         self._next_joint_cmd.ctrl_mode = np.ones((len(jnames), 1), dtype=np.int32) # default to position control
 
     def setPositionReference(self, pos_ref: np.ndarray):
+        """Set position references for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        pos_ref : np.ndarray
+            Array of shape (N,) with position targets in radians, one per joint
+            in the order set by :meth:`enableJoints`.
+        """
         self._next_joint_cmd.pvesd[:, 0] = pos_ref
 
     def setVelocityReference(self, vel_ref: np.ndarray):
+        """Set velocity references for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        vel_ref : np.ndarray
+            Array of shape (N,) with velocity targets in rad/s.
+        """
         self._next_joint_cmd.pvesd[:, 1] = vel_ref
 
     def setEffortReference(self, tor_ref: np.ndarray):
+        """Set effort (torque) feedforward references for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        tor_ref : np.ndarray
+            Array of shape (N,) with torque feedforward values in N or Nm.
+        """
         self._next_joint_cmd.pvesd[:, 2] = tor_ref
 
     def setStiffness(self, K: np.ndarray):
+        """Set stiffness gains for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        K : np.ndarray
+            Array of shape (N,) with position-gain values.
+        """
         self._next_joint_cmd.pvesd[:, 3] = K
 
     def setDamping(self, D: np.ndarray):
+        """Set damping gains for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        D : np.ndarray
+            Array of shape (N,) with damping values.
+        """
         self._next_joint_cmd.pvesd[:, 4] = D
 
     def setCtrlMode(self, ctrl_mode: np.ndarray):
+        """Set the control mode bitmask for the currently enabled joints.
+
+        Using :meth:`set_command` or :meth:`send_command` with a custom JointsCommand overrides
+        the result of this method.
+
+        Parameters
+        ----------
+        ctrl_mode : np.ndarray
+            Integer array of shape (N, 1) with control mode flags per joint.
+        """
         self._next_joint_cmd.ctrl_mode = ctrl_mode
 
     def get_imu_names(self) -> List[str]:
+        """Return the ordered list of IMU names as known to the server."""
         return self._imu_names.copy()
-    
+
     def getImuAngularVelocity(self, req_imu_names: Sequence[str] | None = None) -> np.ndarray:
+        """Return the last sensed angular velocity for the requested IMUs. The current IMU state is updated by calling :meth:`sense`.
+
+        Parameters
+        ----------
+        req_imu_names : sequence of str, optional
+            IMU names to query. Defaults to all IMUs.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape (M, 3) with [wx, wy, wz] in rad/s for each requested IMU.
+        """
         imu_names = self._imu_names
         if req_imu_names is None:
             req_imu_names = imu_names
         imu_idxs = np.array([imu_names.index(n) for n in req_imu_names])
         imu_state = self._last_imu_state_arr
         return imu_state[imu_idxs, 3:6]
-    
+
     def getImuLinearAcceleration(self, req_imu_names: Sequence[str] | None = None) -> np.ndarray:
+        """Return the last sensed linear acceleration for the requested IMUs. The current IMU state is updated by calling :meth:`sense`.
+
+        Parameters
+        ----------
+        req_imu_names : sequence of str, optional
+            IMU names to query. Defaults to all IMUs.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape (M, 3) with [ax, ay, az] in m/s² for each requested IMU.
+        """
         imu_names = self._imu_names
         if req_imu_names is None:
             req_imu_names = imu_names
         imu_idxs = np.array([imu_names.index(n) for n in req_imu_names])
         imu_state = self._last_imu_state_arr
         return imu_state[imu_idxs, 0:3]
-    
+
     def getImuOrientation(self, req_imu_names: Sequence[str] | None = None) -> np.ndarray:
+        """Return the last sensed orientation for the requested IMUs as quaternions. The current IMU state is updated by calling :meth:`sense`.
+
+        Parameters
+        ----------
+        req_imu_names : sequence of str, optional
+            IMU names to query. Defaults to all IMUs.
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape (M, 4) with quaternions in [x, y, z, w] order for each
+            requested IMU.
+        """
         imu_names = self._imu_names
         if req_imu_names is None:
             req_imu_names = imu_names
         imu_state = self._last_imu_state_arr
         imu_idxs = np.array([imu_names.index(n) for n in req_imu_names])
         return imu_state[imu_idxs, 6:10] # quaternion in xyzw order
-    
+
     def setup_gc_for_control_loop(self, disable_fully : bool = False):
         """ Sets up garbage collection to minimize latencies introduced by the garbage collector.
-            You can cal lthis method at the beginning of your control loop, and call it again every time you restart the loop.
+            You can call this method at the beginning of your control loop, and call it again every time you restart the loop.
+            In the case of and RL setting for example you would call this before each episode.
             It will do the following:
             - It first enables garbage collection if it was disabled
             - Then it unfreezes whatever is already frozen, to make it available for collection.
             - Then it performs a full garbage collection to clean up everything that needs to be collected.
             - Then it freezes all currently allocated objects, so they are ignored in future collections, to make gc calls faster.
             - Finally, if disable_fully is True, it disables garbage collection completely. This can lead to memory leaks if not used carefully.
+
+        Parameters
+        ----------
+        disable_fully : bool
+            Whether to disable garbage collection completely after the initial cleanup. Defaults to False.
         """
         gc.enable() # enable garbage collection if it was disabled, to be sure
         gc.unfreeze() # unfreezes whatever is already frozen
