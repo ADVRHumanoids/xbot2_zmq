@@ -1,6 +1,8 @@
 #include "zmq_io.h"
 #include <time.h>
 #include <cstdint>
+#include <atomic>
+#include <chrono>
 
 uint64_t monotonic_ns() {
     struct timespec ts;
@@ -118,6 +120,8 @@ bool ZmqIO::on_initialize()
     jinfo("Binding REP socket to {}", service_bind_addr);
     req_resp_socket = std::make_unique<zmq::socket_t>(*context, ZMQ_REP);
     req_resp_socket->bind(service_bind_addr);
+
+    _safety_flag = Hal::JointSafety::get_shared_safety_flag();
 
     return true;
 }
@@ -263,6 +267,9 @@ void ZmqIO::publish_state()
 
     std::vector<uint8_t> raw_msg = build_state_msg_raw(imu_names, joints_state, joints_num, imus_state);
     raw_publisher->send(zmq::buffer(raw_msg), zmq::send_flags::none);
+    _last_state_seq = seq - 1;
+    _last_state_publish_ns = monotonic_ns();
+    _state_publish_count++;
 }
 
 void ZmqIO::handle_request_response()
@@ -337,7 +344,7 @@ void ZmqIO::handle_request_response()
             }
             resp_yaml["success"] = Hal::JointSafety::enable_filter(enabled, cutoff_hz);
         }
-        else if(req_type == "start_plugin")
+        else if(req_type == "plugin_status")
         {
             std::string plugin_name;
             if(req_yaml["plugin"] && req_yaml["plugin"].IsScalar()) {
@@ -347,7 +354,122 @@ void ZmqIO::handle_request_response()
                 req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
                 return;
             }
-            resp_yaml["success"] = sendCommand(plugin_name, Runnable::Command::Start);
+            Runnable::State plugin_state;
+            const bool status_ok = getPluginState(plugin_name, plugin_state);
+            resp_yaml["success"] = status_ok;
+            if(status_ok)
+            {
+                resp_yaml["data"]["state"] = Runnable::StateAsString(plugin_state);
+            }
+            else
+            {
+                resp_yaml["message"] = "failed to read plugin state for '" + plugin_name + "'";
+            }
+        }
+        else if(req_type == "plugin_command")
+        {
+            std::string plugin_name;
+            std::string command_name;
+            if(req_yaml["plugin"] && req_yaml["plugin"].IsScalar()) {
+                plugin_name = req_yaml["plugin"].as<std::string>();
+            } else {
+                resp_yaml["message"] = "missing or invalid 'plugin' field";
+                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
+                return;
+            }
+            if(req_yaml["command"] && req_yaml["command"].IsScalar()) {
+                command_name = req_yaml["command"].as<std::string>();
+            } else {
+                resp_yaml["message"] = "missing or invalid 'command' field";
+                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
+                return;
+            }
+
+            Runnable::Command command;
+            if(command_name == "start") {
+                command = Runnable::Command::Start;
+            } else if(command_name == "stop") {
+                command = Runnable::Command::Stop;
+            } else if(command_name == "abort") {
+                command = Runnable::Command::Abort;
+            } else {
+                resp_yaml["message"] = "invalid plugin command '" + command_name + "'";
+                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
+                return;
+            }
+
+            const bool command_ok = sendCommand(plugin_name, command);
+            resp_yaml["success"] = command_ok;
+            if(!command_ok)
+            {
+                resp_yaml["message"] = "failed to send '" + command_name + "' to plugin '" + plugin_name + "'";
+            }
+        }
+        else if(req_type == "safety_status")
+        {
+            auto safety_status = Hal::JointSafety::status();
+            resp_yaml["success"] = true;
+            resp_yaml["data"]["safety_enabled"] = safety_status.safety_enabled;
+            resp_yaml["data"]["filter_enabled"] = safety_status.filter_enabled;
+            resp_yaml["data"]["cutoff_hz"] = safety_status.cutoff_hz;
+            resp_yaml["data"]["safety_triggered"] = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
+        }
+        else if(req_type == "safety_restore")
+        {
+            const bool restore_ok = Hal::JointSafety::restore();
+            resp_yaml["success"] = restore_ok;
+            if(!restore_ok)
+            {
+                resp_yaml["message"] = "failed to restore XBot joint safety";
+            }
+        }
+        else if(req_type == "state_stats")
+        {
+            uint64_t now_ns = monotonic_ns();
+            resp_yaml["success"] = true;
+            resp_yaml["data"]["last_seq"] = _last_state_seq;
+            resp_yaml["data"]["publish_count"] = static_cast<unsigned long long>(_state_publish_count);
+            resp_yaml["data"]["last_publish_monotonic_ns"] = static_cast<unsigned long long>(_last_state_publish_ns);
+            resp_yaml["data"]["last_publish_age_s"] = _last_state_publish_ns > 0 ?
+                static_cast<double>(now_ns - _last_state_publish_ns) * 1e-9 : -1.0;
+        }
+        else if(req_type == "cmd_stats")
+        {
+            uint64_t now_ns = monotonic_ns();
+            const bool timeout_active = cmd_timeout.time_since_epoch().count() != 0;
+            resp_yaml["success"] = true;
+            resp_yaml["data"]["last_seq"] = _last_cmd_seq;
+            resp_yaml["data"]["last_session_id"] = static_cast<unsigned long long>(_last_cmd_session_id);
+            resp_yaml["data"]["last_recv_monotonic_ns"] = static_cast<unsigned long long>(_last_cmd_recv_ns);
+            resp_yaml["data"]["last_recv_age_s"] = _last_cmd_recv_ns > 0 ?
+                static_cast<double>(now_ns - _last_cmd_recv_ns) * 1e-9 : -1.0;
+            resp_yaml["data"]["consecutive_steps"] = cmd_consecutive_steps;
+            resp_yaml["data"]["timeout_active"] = timeout_active;
+            resp_yaml["data"]["timeout_remaining_s"] = timeout_active ?
+                std::chrono::duration<double>(cmd_timeout - chrono::steady_clock::now()).count() : 0.0;
+        }
+        else if(req_type == "health")
+        {
+            uint64_t now_ns = monotonic_ns();
+            auto safety_status = Hal::JointSafety::status();
+            Runnable::State plugin_state;
+            const bool plugin_state_ok = getPluginState("zmq_io", plugin_state);
+            resp_yaml["success"] = true;
+            resp_yaml["data"]["zmq_io_state_ok"] = plugin_state_ok;
+            resp_yaml["data"]["zmq_io_state"] = plugin_state_ok ? Runnable::StateAsString(plugin_state) : std::string();
+            resp_yaml["data"]["safety_enabled"] = safety_status.safety_enabled;
+            resp_yaml["data"]["filter_enabled"] = safety_status.filter_enabled;
+            resp_yaml["data"]["filter_cutoff_hz"] = safety_status.cutoff_hz;
+            resp_yaml["data"]["safety_triggered"] = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
+            resp_yaml["data"]["state_last_seq"] = _last_state_seq;
+            resp_yaml["data"]["state_publish_count"] = static_cast<unsigned long long>(_state_publish_count);
+            resp_yaml["data"]["state_last_publish_age_s"] = _last_state_publish_ns > 0 ?
+                static_cast<double>(now_ns - _last_state_publish_ns) * 1e-9 : -1.0;
+            resp_yaml["data"]["cmd_last_seq"] = _last_cmd_seq;
+            resp_yaml["data"]["cmd_last_session_id"] = static_cast<unsigned long long>(_last_cmd_session_id);
+            resp_yaml["data"]["cmd_last_recv_age_s"] = _last_cmd_recv_ns > 0 ?
+                static_cast<double>(now_ns - _last_cmd_recv_ns) * 1e-9 : -1.0;
+            resp_yaml["data"]["cmd_timeout_active"] = cmd_timeout.time_since_epoch().count() != 0;
         }
         else {
             jerror("unknown request type: {}", req_type);
@@ -450,6 +572,18 @@ void ZmqIO::recv_cmd_v3()
 
     if (cmd_subscriber->recv(cmd, zmq::recv_flags::dontwait))
     {
+        if(_safety_flag && _safety_flag->load(std::memory_order_relaxed))
+        {
+            if(cmd_consecutive_steps > 0)
+            {
+                jerror("joint safety is triggered, releasing resources and ignoring ZMQ commands");
+                _robot->releaseResources();
+                cmd_timeout = decltype(cmd_timeout)();
+                cmd_consecutive_steps = 0;
+            }
+            return;
+        }
+
         try
         {
             size_t header_size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint64_t);
@@ -525,10 +659,21 @@ void ZmqIO::recv_cmd_v3()
                 j->setControlMode(static_cast<ControlMode::Type>(joints_ctrl_vec[0]));
             }
 
+            _last_cmd_seq = seq;
+            _last_cmd_session_id = client_session_id;
+            _last_cmd_recv_ns = now_ns;
+
             cmd_timeout = chrono::steady_clock::now() + 1s;
             cmd_consecutive_steps++;
 
             _robot->move();
+            if(_safety_flag && _safety_flag->load(std::memory_order_relaxed))
+            {
+                jerror("joint safety triggered while applying ZMQ command, releasing resources");
+                _robot->releaseResources();
+                cmd_timeout = decltype(cmd_timeout)();
+                cmd_consecutive_steps = 0;
+            }
         }
         catch(const std::exception& e)
         {

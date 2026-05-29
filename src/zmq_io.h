@@ -1,7 +1,9 @@
 #include <xbot2/rt_plugin/control_plugin.h>
 #include <zmq.hpp>
+#include <atomic>
 #include <deque>
 #include <map>
+#include <memory>
 #include <cmath>
 
 typedef double DoubleType;
@@ -64,6 +66,7 @@ private:
                                     Eigen::Ref<Eigen::MatrixXd> imus_state);
     std::unique_ptr<zmq::context_t> context;
     std::unique_ptr<zmq::socket_t> cmd_subscriber, req_resp_socket, raw_publisher;
+    std::shared_ptr<std::atomic_bool> _safety_flag;
 
     uint32_t seq = 0;
     JointNameMap jmap;
@@ -72,6 +75,14 @@ private:
     long cmd_consecutive_steps = 0;
 
     std::map<uint64_t, ClientDelayStats> _client_delay_stats;
+
+    uint32_t _last_state_seq = 0;
+    uint64_t _last_state_publish_ns = 0;
+    uint64_t _state_publish_count = 0;
+
+    uint32_t _last_cmd_seq = 0;
+    uint64_t _last_cmd_recv_ns = 0;
+    uint64_t _last_cmd_session_id = 0;
 
 };
 
