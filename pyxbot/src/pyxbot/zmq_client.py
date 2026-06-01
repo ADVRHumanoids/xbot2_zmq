@@ -67,7 +67,7 @@ class JointState():
         """
         self._joint_states_ppvvettpvekd = ppvvettpvekd
         self._joint_states_ppvvettpvekd.flags.writeable = False
-        self._pve_idx = np.array([0,3,4])
+        self._pve_idx = np.array([0,2,4])
         self._pvesd_refs_idx = np.array([7,8,9,10,11])
 
     def data(self) -> np.ndarray:
@@ -75,7 +75,7 @@ class JointState():
         return self._joint_states_ppvvettpvekd
 
     def pve(self) -> np.ndarray:
-        """Return columns [pos_joint, vel_motor, eff] as shape (N, 3)."""
+        """Return columns [pos_joint, vel_joint, eff] as shape (N, 3)."""
         return self._joint_states_ppvvettpvekd[:, self._pve_idx]
 
     def pvesd_refs(self) -> np.ndarray:
