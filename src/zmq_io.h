@@ -52,6 +52,7 @@ private:
     void getJointPosition(Eigen::Ref<Eigen::VectorXd> out) const;
     void getMotorPosition(Eigen::Ref<Eigen::VectorXd> out) const;
     void getJointPositionReference(Eigen::Ref<Eigen::VectorXd> out) const;
+    std::vector<std::string> getStateJointNames() const;
     void readToMat(const std::string& data_str, Eigen::Ref<Eigen::MatrixXd> out,
                       int rows, int cols);
     void readToMat(const std::string& data_str, Eigen::Ref<Eigen::MatrixXi> out,

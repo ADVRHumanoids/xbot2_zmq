@@ -254,7 +254,6 @@ class XbotZmqClient:
         self._last_joints_state_arr : np.ndarray = None
         self._last_imu_state_arr : np.ndarray = None
         self._imu_states : dict[str,np.ndarray] = {}
-        self._floating_base = True
         self._client_session_id = np.array([np.random.randint(0, np.iinfo(np.uint64).max, dtype=np.uint64)], dtype=np.uint64)
 
     def _resolve_urls(self):
@@ -345,8 +344,6 @@ class XbotZmqClient:
         names = self._request_data({"type": "joint_names"})
         if self._verbose:
             print(f"Received joint names from server: {names}")
-        if self._floating_base:
-            names = names[1:]  # Remove the floating base joint
         return names
 
     def _get_imu_names_remote(self):
@@ -536,22 +533,19 @@ class XbotZmqClient:
 
         cmd = self._next_joint_cmd
         stamp_ns = self._cmd_stamp_ns
-
-        if cmd.pvesd.shape != (self._joints_num, 5):
-            raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
-        if cmd.ctrl_mode.shape != (self._joints_num, 1):
-            raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(self._joints_num, 1)}")
-
         jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
         joints_num = len(jnames)
+
+        if cmd.pvesd.shape != (joints_num, 5):
+            raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(joints_num, 5)}")
+        if cmd.ctrl_mode.shape != (joints_num, 1):
+            raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(joints_num, 1)}")
 
         seq_arr = np.array([self._cmd_seq], dtype=np.uint32, order='C')
         stamp_arr = np.array([stamp_ns], dtype=np.uint64, order='C') # convert seconds to nanoseconds
         joints_num_arr = np.array([joints_num], dtype=np.uint32, order='C')
         client_session_id_arr = self._client_session_id
         joint_ids = np.array([self._joint_names_to_idx[n] for n in jnames], dtype=np.uint32, order='C')
-        if self._floating_base:
-            joint_ids = joint_ids + 1 # shift by one to account for the floating base joint at index 0
         pvesd = cmd.pvesd.astype(np.float64, order='C')
         ctrl  = cmd.ctrl_mode.flatten().astype(np.int32, order='C')
         return (  seq_arr.tobytes()

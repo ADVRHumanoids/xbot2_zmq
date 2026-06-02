@@ -171,6 +171,19 @@ void ZmqIO::getJointPositionReference(Eigen::Ref<Eigen::VectorXd> out) const
     out = tmp_buffer2;
 }
 
+std::vector<std::string> ZmqIO::getStateJointNames() const
+{
+    std::vector<std::string> names = _robot->getJointNames();
+    int joints_num = _robot->getJointNum();
+    if(_robot->isFloatingBase())
+        joints_num -= 1;
+
+    if(names.size() > static_cast<size_t>(joints_num))
+        names.erase(names.begin(), names.end() - joints_num);
+
+    return names;
+}
+
 /**
  * Builds a raw state message string from the provided data. The output is structured as follows:
  * - All data is in 64-bit double precision for floating-point values and 32-bit integers for integer values.
@@ -315,7 +328,7 @@ void ZmqIO::handle_request_response()
         }
         else if(req_type == "joint_names") {
             resp_yaml["success"] = true;
-            resp_yaml["data"] = _robot->getJointNames();
+            resp_yaml["data"] = getStateJointNames();
         }
         else if(req_type == "imu_names") {
             resp_yaml["success"] = true;
@@ -618,7 +631,7 @@ void ZmqIO::recv_cmd_v3()
 
             std::vector<std::string> joint_names(cmd_joints_num);
             const int32_t* joint_ids = reinterpret_cast<const int32_t*>(ptr + header_size);
-            std::vector<std::string> all_joint_names = _robot->getJointNames();
+            std::vector<std::string> all_joint_names = getStateJointNames();
             for(int i = 0; i < cmd_joints_num; ++i)
             {
                 int32_t idx = joint_ids[i];
