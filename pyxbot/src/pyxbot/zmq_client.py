@@ -212,6 +212,7 @@ class XbotZmqClient:
         self._last_msg_seq = 0
         self._last_msg_stamp = 0.0
         self._cmd_seq = 0
+        self._last_msg_rec_time = float("-inf")
         self._last_joints_state_arr : np.ndarray = None
         self._last_imu_state_arr : np.ndarray = None
         self._imu_states : dict[str,np.ndarray] = {}
@@ -382,7 +383,7 @@ class XbotZmqClient:
         return seq, stamp, joints_state_arr, imu_state_arr
 
 
-    def sense(self, timeout_s : float = float("+inf")):
+    def sense(self, timeout_s : float = float("+inf"), blocking : bool = True) -> bool:
         """Read the latest joint and IMU state from the robot.
 
         Drains any queued messages and stores the result internally. Call this
@@ -406,14 +407,30 @@ class XbotZmqClient:
             while True:
                 try:
                     msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
+                    self._last_msg_rec_time = time.monotonic()
                     # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                     self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
                 except zmq.Again:
                     # print("No joint state message available yet...")
-                    if time.monotonic() - t0 > timeout_s:
-                        raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+                    remainingtime = timeout_s - (time.monotonic() - t0)
+                    if remainingtime <=0:
+                        if blocking:
+                            raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+                        else:
+                            return False
+                    self._jointstates_socket.poll(timeout=int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None) # wait max 10ms for new messages to arrive, then manually check again.
                     break # no data available
+        return True # we got a message
 
+    def get_last_state_rec_time(self):
+        """Get the timestamp of when the last robot state message was received, in time.monotonic time.
+            Returns None if no message has been received yet."""
+        return self._last_msg_rec_time
+
+    def get_last_state_age(self):
+        """Get the age of the last received robot state message in seconds. Returns None if no message has been received yet.
+        This is the age calculated from the time the message was received, not from the timestamp in the message itself."""
+        return time.monotonic() - self._last_msg_rec_time
 
     def _build_command_raw(self) -> bytes:
         """Build a raw bytes command using the current client state and following the recv_cmd_v3 format:
