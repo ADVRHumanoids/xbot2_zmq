@@ -401,26 +401,68 @@ class XbotZmqClient:
         TimeoutError
             If no message arrives within ``timeout_s`` seconds.
         """
+        # msg = None
+        # t0 = time.monotonic()
+        # while msg is None:
+        #     while True:
+        #         try:
+        #             msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
+        #             # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
+        #             self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
+        #         except zmq.Again:
+        #             # print("No joint state message available yet...")
+        #             if time.monotonic() - t0 > timeout_s:
+        #                 raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+        #             break # no data available
+                
         msg = None
+        blocking = True
         t0 = time.monotonic()
         while msg is None:
             while True:
                 try:
                     msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
                     self._last_msg_rec_time = time.monotonic()
+                    print(f"{time.monotonic()*1000:.3f} Received joint state message of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
                     # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                     self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
                 except zmq.Again:
-                    # print("No joint state message available yet...")
+                    print(f"{time.monotonic()*1000:.3f} No joint state message available yet...")
                     remainingtime = timeout_s - (time.monotonic() - t0)
                     if remainingtime <=0:
                         if blocking:
                             raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
                         else:
+                            print(f"{time.monotonic()*1000:.3f} returning false")
                             return False
-                    self._jointstates_socket.poll(timeout=int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None) # wait max 10ms for new messages to arrive, then manually check again.
+                    # polling_max_dur_ms = int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None
+                    # print(f"{time.monotonic()*1000:.3f} polling")
+                    # t0 = time.monotonic()
+                    # self._jointstates_socket.poll(timeout=polling_max_dur_ms) # wait max 10ms for new messages to arrive, then manually check again.
+                    # print(f"Polling lasted {time.monotonic()-t0:.3f}s")
                     break # no data available
+        print(f"{time.monotonic()*1000:.3f} returning true")
         return True # we got a message
+        # msg = None
+        # print(f"Waiting for joint state message with timeout {timeout_s} seconds...")
+        # t0 = time.monotonic()
+        # while msg is None:
+        #     try:
+        #         msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
+        #         self._last_msg_rec_time = time.monotonic()
+        #         print(f"Received joint state message of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
+        #         # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
+        #         self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
+        #     except zmq.Again:
+        #         print("No joint state message available yet...")
+        #         remainingtime = timeout_s - (time.monotonic() - t0)
+        #         if remainingtime <=0:
+        #             if blocking:
+        #                 raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+        #             else:
+        #                 return False
+        #         self._jointstates_socket.poll(timeout=int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None) # wait max 10ms for new messages to arrive, then manually check again.
+        # return True # we got a message
 
     def get_last_state_rec_time(self):
         """Get the timestamp of when the last robot state message was received, in time.monotonic time.
