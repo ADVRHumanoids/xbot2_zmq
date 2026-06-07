@@ -132,6 +132,39 @@ class JointState():
                 f"           vel_ref={self.vel_ref},\n"
                 f"           eff_ref={self.eff_ref})")
 
+class ClockDeltaEstimator:
+    """Sliding-window minimum estimator for (t_recv - t_send).
+
+    Approximates the time delta between server and client, obtaining a lower bound on 
+    true_clock_offset + one_way_latency over a rolling window. The clock delta between
+    our clock the server's and is always delta >= true_clock_offset + one_way_latency.
+    We cannot distinguish between offset and latency with this method, but we can at 
+    least approximate a lower bound on the sum of the two, which gives us a lower bound on
+    the delta.
+    This allows to check for state message ages.
+
+    """
+
+    def __init__(self, window: int = 200):
+        self._buf = np.full(window, np.inf, dtype=np.float64)
+        self._head = 0
+
+    def update(self, server_stamp: float) -> None:
+        delta = time.monotonic() - server_stamp
+        self._buf[self._head] = delta
+        self._head = (self._head + 1) % len(self._buf)
+
+    @property
+    def min_delta(self) -> float:
+        """ The real delta is approximately at least this small"""
+        return float(np.min(self._buf))
+
+    def age(self, server_stamp: float) -> float:
+        """This is an approximate lower bound on the age. The age could be higher than this,
+          but not much lower."""
+        return time.monotonic() - (server_stamp + self.min_delta)
+
+
 class XbotZmqClient:
     """ZMQ-based client for communicating with an xbot2 robot.
 
@@ -212,7 +245,10 @@ class XbotZmqClient:
         self._last_msg_seq = 0
         self._last_msg_stamp = 0.0
         self._cmd_seq = 0
+        self._max_state_age_s = 0.1 # warn if received state messages are estimated to be older than this threshold
+        self._sense_call_count = 0
         self._last_msg_rec_time = float("-inf")
+        self._delta_estimator = ClockDeltaEstimator()
         self._last_joints_state_arr : np.ndarray = None
         self._last_imu_state_arr : np.ndarray = None
         self._imu_states : dict[str,np.ndarray] = {}
@@ -260,9 +296,9 @@ class XbotZmqClient:
             print(f"Got IMU names: {self._imu_names}")
 
         self._jointstates_socket = context.socket(zmq.SUB)
-        self._jointstates_socket.connect(self._jointstates_url)
+        self._jointstates_socket.setsockopt(zmq.CONFLATE, 1)  # last msg only. IMPORTANT! this must be before connect!
         self._jointstates_socket.subscribe("")  # Subscribe to all topics
-        self._jointstates_socket.setsockopt(zmq.CONFLATE, 1)  # last msg only.
+        self._jointstates_socket.connect(self._jointstates_url)
         if self._verbose:
             print(f"Connected to joint states socket at {self._jointstates_url}")
 
@@ -326,16 +362,6 @@ class XbotZmqClient:
         """Return the ordered list of joint names as known to the server."""
         return self._joint_names.copy()
 
-    # def _extract_arrs_proto(self, msg):
-    #     rx_msg = proto_msgs.GenericRxMsg.FromString(msg)
-    #     seq = rx_msg.seq
-    #     stamp = rx_msg.stamp
-
-    #     if hasattr(rx_msg, 'js') and rx_msg.js is not None:
-    #         joints_state_arr = np.frombuffer(rx_msg.js.joint_states_ppvvettpvekd, dtype=np.float64).reshape(self._raw_joints_state_shape, order='C')
-    #         imu_state_arr = np.frombuffer(rx_msg.js.imu_linxyz_angxyz_quatsxyzw, dtype=np.float64).reshape(self._raw_imu_state_shape, order='C')
-    #     return seq, stamp, joints_state_arr, imu_state_arr
-
     def _extract_arrs_raw(self, msg : bytes):
         """ Extracts state data from a raw bytes message, which should follow the following format:
             - All data is in 64-bit double precision for floating-point values and 32-bit integers for integer values.
@@ -382,7 +408,22 @@ class XbotZmqClient:
         stamp = float(stamp)
         return seq, stamp, joints_state_arr, imu_state_arr
 
-
+    def _busy_sense(self, timeout_s : float = float("+inf")) -> bool:
+        msg = None
+        t0 = time.monotonic()
+        while msg is None:
+            while True:
+                try:
+                    msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
+                    # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
+                    self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
+                except zmq.Again:
+                    # print("No joint state message available yet...")
+                    if time.monotonic() - t0 > timeout_s:
+                        raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+                    break # no data available
+        return True # we got a message
+    
     def sense(self, timeout_s : float = float("+inf"), blocking : bool = True) -> bool:
         """Read the latest joint and IMU state from the robot.
 
@@ -401,78 +442,45 @@ class XbotZmqClient:
         TimeoutError
             If no message arrives within ``timeout_s`` seconds.
         """
-        # msg = None
-        # t0 = time.monotonic()
-        # while msg is None:
-        #     while True:
-        #         try:
-        #             msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
-        #             # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
-        #             self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
-        #         except zmq.Again:
-        #             # print("No joint state message available yet...")
-        #             if time.monotonic() - t0 > timeout_s:
-        #                 raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
-        #             break # no data available
+        self._sense_call_count += 1
+        # return self._busy_sense(timeout_s=timeout_s)
                 
         msg = None
-        blocking = True
         t0 = time.monotonic()
         while msg is None:
-            while True:
                 try:
                     msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
                     self._last_msg_rec_time = time.monotonic()
-                    print(f"{time.monotonic()*1000:.3f} Received joint state message of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
-                    # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                     self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
+                    self._delta_estimator.update(self._last_msg_stamp)
+                    # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} Received joint state message {self._last_msg_seq} of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
+                    age = self._delta_estimator.age(self._last_msg_stamp)
+                    if age > self._max_state_age_s:
+                        print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} Warning: received a message with estimated age {age:.3f} seconds, which is above the configured maximum of {self._max_state_age_s} seconds")
+                    break
+                    # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                 except zmq.Again:
-                    print(f"{time.monotonic()*1000:.3f} No joint state message available yet...")
+                    # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} No joint state message available yet after {time.monotonic() - t0:.3f} seconds...")
                     remainingtime = timeout_s - (time.monotonic() - t0)
                     if remainingtime <=0:
                         if blocking:
                             raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
                         else:
-                            print(f"{time.monotonic()*1000:.3f} returning false")
+                            # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} returning false")
                             return False
-                    # polling_max_dur_ms = int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None
-                    # print(f"{time.monotonic()*1000:.3f} polling")
-                    # t0 = time.monotonic()
-                    # self._jointstates_socket.poll(timeout=polling_max_dur_ms) # wait max 10ms for new messages to arrive, then manually check again.
-                    # print(f"Polling lasted {time.monotonic()-t0:.3f}s")
-                    break # no data available
-        print(f"{time.monotonic()*1000:.3f} returning true")
+                    polling_max_dur_ms = int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None
+                    self._jointstates_socket.poll(timeout=polling_max_dur_ms) # wait max 10ms for new messages to arrive, then manually check again.
         return True # we got a message
-        # msg = None
-        # print(f"Waiting for joint state message with timeout {timeout_s} seconds...")
-        # t0 = time.monotonic()
-        # while msg is None:
-        #     try:
-        #         msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
-        #         self._last_msg_rec_time = time.monotonic()
-        #         print(f"Received joint state message of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
-        #         # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
-        #         self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
-        #     except zmq.Again:
-        #         print("No joint state message available yet...")
-        #         remainingtime = timeout_s - (time.monotonic() - t0)
-        #         if remainingtime <=0:
-        #             if blocking:
-        #                 raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
-        #             else:
-        #                 return False
-        #         self._jointstates_socket.poll(timeout=int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None) # wait max 10ms for new messages to arrive, then manually check again.
-        # return True # we got a message
 
     def get_last_state_rec_time(self):
         """Get the timestamp of when the last robot state message was received, in time.monotonic time.
             Returns None if no message has been received yet."""
         return self._last_msg_rec_time
 
-    def get_last_state_age(self):
+    def get_state_age_estimate(self):
         """Get the age of the last received robot state message in seconds. Returns None if no message has been received yet.
-        This is the age calculated from the time the message was received, not from the timestamp in the message itself."""
-        return time.monotonic() - self._last_msg_rec_time
+        This is an estimate, only use it a lower bound (age is at least this much)"""
+        return self._delta_estimator.age(self._last_msg_stamp) if self._last_msg_rec_time != float("-inf") else None
 
     def _build_command_raw(self) -> bytes:
         """Build a raw bytes command using the current client state and following the recv_cmd_v3 format:
