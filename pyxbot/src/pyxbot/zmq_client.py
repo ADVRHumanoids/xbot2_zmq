@@ -355,6 +355,9 @@ class XbotZmqClient:
         """Set the server-side low-pass filter cutoff frequency for joint states."""
         self._request_data({"type": "set_filter_frequency_hz", "enabled": enabled, "cutoff_hz": cutoff_freq})
 
+    def get_plugin_status(self, plugin: str = "zmq_io", timeout_s: float = 1.0) -> str:
+        return self._request_data({"type": "plugin_status", "plugin": plugin}, timeout_s=timeout_s)["state"]
+    
     def get_health(self, timeout_s: float = 1.0) -> dict:
         """Single liveness + safety report from the server.
 

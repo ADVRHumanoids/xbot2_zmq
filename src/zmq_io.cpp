@@ -369,6 +369,28 @@ void ZmqIO::handle_request_response()
             }
             resp_yaml["success"] = Hal::JointSafety::enable_filter(enabled, cutoff_hz);
         }
+        else if(req_type == "plugin_status")
+        {
+            std::string plugin_name;
+            if(req_yaml["plugin"] && req_yaml["plugin"].IsScalar()) {
+                plugin_name = req_yaml["plugin"].as<std::string>();
+            } else {
+                resp_yaml["message"] = "missing or invalid 'plugin' field";
+                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
+                return;
+            }
+            Runnable::State plugin_state;
+            const bool status_ok = getPluginState(plugin_name, plugin_state);
+            resp_yaml["success"] = status_ok;
+            if(status_ok)
+            {
+                resp_yaml["data"]["state"] = Runnable::StateAsString(plugin_state);
+            }
+            else
+            {
+                resp_yaml["message"] = "failed to read plugin state for '" + plugin_name + "'";
+            }
+        }
         else if(req_type == "plugin_command")
         {
             // NEUTERED: a ZMQ client must not have authority to start/stop/abort RT plugins.
