@@ -4,7 +4,7 @@ import numpy as np
 import sys
 
 if __name__ == "__main__":
-    client = XbotZmqClient()
+    client = XbotZmqClient(protocol="tcp")
     client.start()
     joint_names = client.get_joint_names()
     print(f"joint names: {joint_names}")

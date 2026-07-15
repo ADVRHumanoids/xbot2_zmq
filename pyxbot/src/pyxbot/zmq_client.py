@@ -358,7 +358,7 @@ class XbotZmqClient:
     def get_plugin_status(self, plugin: str = "zmq_io", timeout_s: float = 1.0) -> str:
         return self._request_data({"type": "plugin_status", "plugin": plugin}, timeout_s=timeout_s)["state"]
     
-    def get_health(self, timeout_s: float = 1.0) -> dict:
+    def get_status(self, timeout_s: float = 1.0) -> dict:
         """Single liveness + safety report from the server.
 
         Fields: zmq_io_state_ok, zmq_io_state, safety_enabled, filter_enabled, filter_cutoff_hz,
@@ -367,7 +367,7 @@ class XbotZmqClient:
         away. 'plugin_status'/'plugin_command' (client plugin control) and 'restore_safety' were
         removed / neutered server-side (a client must not have that authority).
         """
-        return self._request_data({"type": "health"}, timeout_s=timeout_s)
+        return self._request_data({"type": "status"}, timeout_s=timeout_s)
 
     def _get_urdf_remote(self) -> str:
         """Fetch the robot URDF string from the server."""

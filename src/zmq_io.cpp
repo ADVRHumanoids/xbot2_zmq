@@ -12,9 +12,9 @@ uint64_t monotonic_ns() {
 
 using namespace XBot;
 
-DelayWarn ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
+DelayStatus ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
     // RT-safe: pure computation, no logging/I/O. Returns the anomalies for the caller to jwarn.
-    DelayWarn w;
+    DelayStatus w;
     bool had_prev = last_update_ns != 0;
     uint64_t now_ns = monotonic_ns();
     int64_t ipt_ns = last_update_ns == 0 ? 0 : static_cast<int64_t>(now_ns - last_update_ns);
@@ -430,7 +430,7 @@ void ZmqIO::handle_request_response()
             resp_yaml["success"] = false;
             resp_yaml["message"] = "safety_restore is not permitted from the ZMQ client";
         }
-        else if(req_type == "health")
+        else if(req_type == "status")
         {
             // Single liveness + safety report. Folds in what the removed 'safety_status' service
             // returned. Every field here has a consumer in the adarl adapters (safety_triggered,
@@ -440,6 +440,7 @@ void ZmqIO::handle_request_response()
             auto safety_status = Hal::JointSafety::status();
             Runnable::State plugin_state;
             const bool plugin_state_ok = getPluginState("zmq_io", plugin_state);
+            auto state_pub_age = static_cast<double>(now_ns - _last_state_publish_ns);
             resp_yaml["success"] = true;
             resp_yaml["data"]["zmq_io_state_ok"] = plugin_state_ok;
             resp_yaml["data"]["zmq_io_state"] = plugin_state_ok ? Runnable::StateAsString(plugin_state) : std::string();
@@ -447,8 +448,7 @@ void ZmqIO::handle_request_response()
             resp_yaml["data"]["filter_enabled"] = safety_status.filter_enabled;
             resp_yaml["data"]["filter_cutoff_hz"] = safety_status.cutoff_hz;
             resp_yaml["data"]["safety_triggered"] = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
-            resp_yaml["data"]["state_last_publish_age_s"] = _last_state_publish_ns > 0 ?
-                static_cast<double>(now_ns - _last_state_publish_ns) * 1e-9 : -1.0;
+            resp_yaml["data"]["state_last_publish_age_s"] = _last_state_publish_ns > 0 ? state_pub_age * 1e-9 : -1.0;
         }
         else {
             jerror("unknown request type: {}", req_type);
@@ -549,131 +549,122 @@ void ZmqIO::recv_cmd_v3()
     // currently not used
     zmq::message_t cmd;
 
+    bool safety_triggered = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
+
     if (cmd_subscriber->recv(cmd, zmq::recv_flags::dontwait))
     {
-        if(_safety_flag && _safety_flag->load(std::memory_order_relaxed))
+        if(safety_triggered)
         {
-            if(cmd_consecutive_steps > 0)
-            {
-                jerror("joint safety is triggered, releasing resources and ignoring ZMQ commands");
-                _robot->releaseResources();
-                cmd_timeout = decltype(cmd_timeout)();
-                cmd_consecutive_steps = 0;
-            }
-            return;
+            jerror("joint safety is triggered, ignoring command");
         }
-
-        try
+        else
         {
-            size_t header_size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint64_t);
-            if (cmd.size() < header_size)
+            try
             {
-                jerror("invalid command size: expected at least {}, got {}, SKIPPING COMMAND.", header_size, cmd.size());
-                return;
-            }
-            const char* ptr = static_cast<const char*>(cmd.data());
-            uint32_t seq               = *reinterpret_cast<const uint32_t*>(ptr);
-            uint64_t stamp_ns          = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t));
-            uint32_t cmd_joints_num    = *reinterpret_cast<const uint32_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t));
-            uint64_t client_session_id = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
-
-            uint64_t now_ns = monotonic_ns();
-            if(cmd_consecutive_steps > 0)
-            {
-                // Command-stream quality diagnostics (transport delay, rate jitter, packet loss).
-                // Not used for control; logged via the RT-safe jwarn only on an anomaly.
-                DelayWarn w = _client_delay_stats[client_session_id].update(
-                    static_cast<int64_t>((now_ns - stamp_ns)), seq);
-                if(w.missed_packets > 0)
-                    jwarn("missed {} command packet(s) from client", w.missed_packets);
-                if(w.abnormal_delay)
-                    jwarn("abnormal client delay: {:.3f} ms (avg {:.3f}, jitter {:.3f}, pkgs since last {})",
-                          w.delay_ms, w.avg_delay_ms, w.jitter_ms, w.packets_since_last);
-                if(w.abnormal_inter_packet)
-                    jwarn("abnormal inter-packet time: {:.3f} ms (avg {:.3f}, jitter {:.3f})",
-                          w.ipt_ms, w.avg_ipt_ms, w.ipt_jitter_ms);
-            }
-            else
-                _client_delay_stats[client_session_id].reset(seq);
-
-            size_t joint_ids_size    = cmd_joints_num * sizeof(int32_t);
-            size_t joints_pvesd_size = cmd_joints_num * 5 * sizeof(DoubleType);
-            size_t joints_ctrl_size  = cmd_joints_num * sizeof(int32_t);
-            size_t expected_size     = header_size + joint_ids_size + joints_pvesd_size + joints_ctrl_size;
-            if(cmd.size() != expected_size)
-            {
-                jerror("invalid command size: expected {}, got {}, SKIPPING COMMAND.", expected_size, cmd.size());
-                return;
-            }
-
-            // jinfo("Received command seq: {}, stamp: {}, joints_num: {}", seq, stamp, cmd_joints_num);
-
-            std::vector<std::string> joint_names(cmd_joints_num);
-            const int32_t* joint_ids = reinterpret_cast<const int32_t*>(ptr + header_size);
-            std::vector<std::string> all_joint_names = getStateJointNames();
-            for(int i = 0; i < cmd_joints_num; ++i)
-            {
-                int32_t idx = joint_ids[i];
-                if(idx < 0 || idx >= all_joint_names.size())
+                size_t header_size = sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint64_t);
+                if (cmd.size() < header_size)
                 {
-                    jerror("invalid joint id {} at index {}, joints_number: {}, SKIPPING COMMAND.", idx, i, all_joint_names.size());
+                    jerror("invalid command size: expected at least {}, got {}, SKIPPING COMMAND.", header_size, cmd.size());
                     return;
                 }
-                joint_names[i] = all_joint_names.at(idx);
-            }
+                const char* ptr = static_cast<const char*>(cmd.data());
+                uint32_t seq               = *reinterpret_cast<const uint32_t*>(ptr);
+                uint64_t stamp_ns          = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t));
+                uint32_t cmd_joints_num    = *reinterpret_cast<const uint32_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t));
+                uint64_t client_session_id = *reinterpret_cast<const uint64_t*>(ptr + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t));
 
-            const DoubleType* pvesd_raw = reinterpret_cast<const DoubleType*>(ptr + header_size + joint_ids_size);
-            Eigen::Matrix<DoubleType, Eigen::Dynamic, Eigen::Dynamic> joints_pvesd(cmd_joints_num, 5);
-            readToMat(pvesd_raw, joints_pvesd_size, joints_pvesd, cmd_joints_num, 5);
-
-            const IntType* ctrl_raw = reinterpret_cast<const IntType*>(ptr + header_size + joint_ids_size + joints_pvesd_size);
-            Eigen::Matrix<IntType, Eigen::Dynamic, Eigen::Dynamic> joints_ctrl(cmd_joints_num, 1);
-            readToMat(ctrl_raw, joints_ctrl_size, joints_ctrl, cmd_joints_num, 1);
-
-            for (int i = 0; i < joint_names.size(); ++i)
-            {
-                const std::string& joint_name = joint_names[i];
-                auto j = _robot->getJoint(joint_name);
-
-                if(!j)
+                uint64_t now_ns = monotonic_ns();
+                if(cmd_consecutive_steps > 0)
                 {
-                    jerror("unknown joint '{}'", joint_name);
-                    continue;
+                    // Command-stream quality diagnostics (transport delay, rate jitter, packet loss).
+                    // Not used for control; logged via the RT-safe jwarn only on an anomaly.
+                    DelayStatus w = _client_delay_stats[client_session_id].update(
+                        static_cast<int64_t>((now_ns - stamp_ns)), seq);
+                    if(w.missed_packets > 0)
+                        jwarn("missed {} command packet(s) from client", w.missed_packets);
+                    if(w.abnormal_delay)
+                        jwarn("abnormal client delay: {:.3f} ms (avg {:.3f}, jitter {:.3f}, pkgs since last {})",
+                            w.delay_ms, w.avg_delay_ms, w.jitter_ms, w.packets_since_last);
+                    if(w.abnormal_inter_packet)
+                        jwarn("abnormal inter-packet time: {:.3f} ms (avg {:.3f}, jitter {:.3f})",
+                            w.ipt_ms, w.avg_ipt_ms, w.ipt_jitter_ms);
                 }
-                auto joint_cmd_vec   = joints_pvesd.row(i);
-                auto joints_ctrl_vec = joints_ctrl.row(i);
-                // std::cout << "Joint '" << joint_name << "' cmd: " << joint_cmd_vec.transpose() << " ctrl: " << joints_ctrl_vec.transpose() << std::endl;
-                j->setPositionReferenceMinimal(Eigen::Scalard(joint_cmd_vec[0]));
-                j->setVelocityReference(Eigen::Scalard(joint_cmd_vec[1]));
-                j->setEffortReference(Eigen::Scalard(joint_cmd_vec[2]));
-                j->setStiffness(Eigen::Scalard(joint_cmd_vec[3]));
-                j->setDamping(Eigen::Scalard(joint_cmd_vec[4]));
-                j->setControlMode(static_cast<ControlMode::Type>(joints_ctrl_vec[0]));
+                else
+                    _client_delay_stats[client_session_id].reset(seq);
+
+                size_t joint_ids_size    = cmd_joints_num * sizeof(int32_t);
+                size_t joints_pvesd_size = cmd_joints_num * 5 * sizeof(DoubleType);
+                size_t joints_ctrl_size  = cmd_joints_num * sizeof(int32_t);
+                size_t expected_size     = header_size + joint_ids_size + joints_pvesd_size + joints_ctrl_size;
+                if(cmd.size() != expected_size)
+                {
+                    jerror("invalid command size: expected {}, got {}, SKIPPING COMMAND.", expected_size, cmd.size());
+                    return;
+                }
+
+                // jinfo("Received command seq: {}, stamp: {}, joints_num: {}", seq, stamp, cmd_joints_num);
+
+                std::vector<std::string> joint_names(cmd_joints_num);
+                const int32_t* joint_ids = reinterpret_cast<const int32_t*>(ptr + header_size);
+                std::vector<std::string> all_joint_names = getStateJointNames();
+                for(int i = 0; i < cmd_joints_num; ++i)
+                {
+                    int32_t idx = joint_ids[i];
+                    if(idx < 0 || idx >= all_joint_names.size())
+                    {
+                        jerror("invalid joint id {} at index {}, joints_number: {}, SKIPPING COMMAND.", idx, i, all_joint_names.size());
+                        return;
+                    }
+                    joint_names[i] = all_joint_names.at(idx);
+                }
+
+                const DoubleType* pvesd_raw = reinterpret_cast<const DoubleType*>(ptr + header_size + joint_ids_size);
+                Eigen::Matrix<DoubleType, Eigen::Dynamic, Eigen::Dynamic> joints_pvesd(cmd_joints_num, 5);
+                readToMat(pvesd_raw, joints_pvesd_size, joints_pvesd, cmd_joints_num, 5);
+
+                const IntType* ctrl_raw = reinterpret_cast<const IntType*>(ptr + header_size + joint_ids_size + joints_pvesd_size);
+                Eigen::Matrix<IntType, Eigen::Dynamic, Eigen::Dynamic> joints_ctrl(cmd_joints_num, 1);
+                readToMat(ctrl_raw, joints_ctrl_size, joints_ctrl, cmd_joints_num, 1);
+
+                for (int i = 0; i < joint_names.size(); ++i)
+                {
+                    const std::string& joint_name = joint_names[i];
+                    auto j = _robot->getJoint(joint_name);
+
+                    if(!j)
+                    {
+                        jerror("unknown joint '{}'", joint_name);
+                        continue;
+                    }
+                    auto joint_cmd_vec   = joints_pvesd.row(i);
+                    auto joints_ctrl_vec = joints_ctrl.row(i);
+                    // std::cout << "Joint '" << joint_name << "' cmd: " << joint_cmd_vec.transpose() << " ctrl: " << joints_ctrl_vec.transpose() << std::endl;
+                    j->setPositionReferenceMinimal(Eigen::Scalard(joint_cmd_vec[0]));
+                    j->setVelocityReference(Eigen::Scalard(joint_cmd_vec[1]));
+                    j->setEffortReference(Eigen::Scalard(joint_cmd_vec[2]));
+                    j->setStiffness(Eigen::Scalard(joint_cmd_vec[3]));
+                    j->setDamping(Eigen::Scalard(joint_cmd_vec[4]));
+                    j->setControlMode(static_cast<ControlMode::Type>(joints_ctrl_vec[0]));
+                }
+
+                cmd_timeout = chrono::steady_clock::now() + 1s;
+                cmd_consecutive_steps++;
+
+                _robot->move();
             }
-
-            cmd_timeout = chrono::steady_clock::now() + 1s;
-            cmd_consecutive_steps++;
-
-            _robot->move();
-            if(_safety_flag && _safety_flag->load(std::memory_order_relaxed))
+            catch(const std::exception& e)
             {
-                jerror("joint safety triggered while applying ZMQ command, releasing resources");
-                _robot->releaseResources();
-                cmd_timeout = decltype(cmd_timeout)();
-                cmd_consecutive_steps = 0;
+                jerror("exception while processing command, SKIPPING: {}", e.what());
             }
-        }
-        catch(const std::exception& e)
-        {
-            jerror("exception while processing command, SKIPPING: {}", e.what());
         }
     }
 
     // if no command received for 1s, release all control mode
-    if(cmd_timeout.time_since_epoch().count() != 0 && 
-        chrono::steady_clock::now() > cmd_timeout) 
+    if( safety_triggered || 
+        (cmd_timeout.time_since_epoch().count() != 0 && 
+        chrono::steady_clock::now() > cmd_timeout)) 
     {
-        jinfo("timeout expired, releasing resources");
+        jinfo("Releasing resources, safety_triggered: {}, cmd_timeout: {}, now: {}", safety_triggered, cmd_timeout.time_since_epoch().count(), chrono::steady_clock::now().time_since_epoch().count());
         _robot->releaseResources();
         cmd_timeout = decltype(cmd_timeout)();
         cmd_consecutive_steps = 0;
