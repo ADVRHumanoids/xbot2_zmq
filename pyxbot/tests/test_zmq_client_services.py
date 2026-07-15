@@ -44,46 +44,43 @@ class TestXbotZmqClientServices(unittest.TestCase):
             tcp_service_port=server.port,
         )
 
-    def test_plugin_status_and_health_requests(self):
+    def test_health_request(self):
+        # 'health' is the single liveness+safety service (safety_status/state_stats/cmd_stats and
+        # plugin_status were folded away / removed).
         server = FakeZmqIoServer([
-            {"success": True, "data": {"state": "Running"}},
             {"success": True, "data": {
                 "zmq_io_state_ok": True,
                 "zmq_io_state": "Running",
+                "safety_enabled": True,
+                "filter_enabled": False,
+                "filter_cutoff_hz": 0.0,
                 "safety_triggered": False,
                 "state_last_publish_age_s": 0.01,
             }},
         ]).start()
         client = self._client(server)
 
-        self.assertEqual(client.get_plugin_status("zmq_io"), "Running")
         health = client.get_health()
         self.assertEqual(health["zmq_io_state"], "Running")
         self.assertFalse(health["safety_triggered"])
+        self.assertIn("state_last_publish_age_s", health)
 
         server.join()
-        self.assertEqual(server.requests[0], {"type": "plugin_status", "plugin": "zmq_io"})
-        self.assertEqual(server.requests[1], {"type": "health"})
+        self.assertEqual(server.requests[0], {"type": "health"})
 
-    def test_plugin_command_uses_explicit_command_names(self):
-        server = FakeZmqIoServer([{"success": True}]).start()
-        client = self._client(server)
-
-        client.plugin_command("homing", "start")
-
-        server.join()
-        self.assertEqual(server.requests[0], {
-            "type": "plugin_command",
-            "plugin": "homing",
-            "command": "start",
-        })
+    def test_removed_client_services_are_gone(self):
+        # These services were removed from both the plugin and the client; guard against a
+        # re-introduction that would resurrect the redundant/unsafe surface.
+        for name in ("get_safety_status", "get_state_stats", "get_cmd_stats",
+                     "get_plugin_status", "plugin_command", "restore_safety"):
+            self.assertFalse(hasattr(XbotZmqClient, name), f"{name} should have been removed")
 
     def test_failed_service_reply_raises(self):
         server = FakeZmqIoServer([{"success": False, "message": "not running"}]).start()
         client = self._client(server)
 
         with self.assertRaisesRegex(RuntimeError, "not running"):
-            client.get_safety_status()
+            client.get_health()
 
         server.join()
 

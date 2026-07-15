@@ -14,6 +14,18 @@ static_assert(sizeof(IntType) == 4, "IntType is not 32 bits");
 
 namespace XBot {
 
+// Anomaly report returned by ClientDelayStats::update(). The stats struct itself does NO I/O
+// (it runs on the RT command-receive path); the caller decides whether/how to log via the
+// plugin's RT-safe jwarn. All values are in ms, prefilled only for the flags that are set.
+struct DelayWarn {
+    int missed_packets = 0;             // >0  -> packets lost since the previous command
+    bool abnormal_delay = false;        // transport delay > 5 sigma over the running mean
+    bool abnormal_inter_packet = false; // gap between packets > 5 sigma (client rate jitter)
+    int packets_since_last = 0;
+    double delay_ms = 0.0, avg_delay_ms = 0.0, jitter_ms = 0.0;
+    double ipt_ms = 0.0, avg_ipt_ms = 0.0, ipt_jitter_ms = 0.0;
+};
+
 struct ClientDelayStats {
     static constexpr size_t WINDOW = 100;
     std::array<int64_t, WINDOW> delays_ns{};
@@ -29,7 +41,9 @@ struct ClientDelayStats {
     uint32_t last_seq = 0;
     uint64_t last_update_ns = 0;
 
-    void update(int64_t delay_ns, uint32_t seq);
+    // Updates the running windows and RETURNS the anomalies detected (no logging here, so this
+    // stays RT-safe; the ZmqIO caller emits jwarn where the plugin logger is available).
+    DelayWarn update(int64_t delay_ns, uint32_t seq);
 
     void reset(uint32_t initial_seq);
 };
@@ -77,13 +91,10 @@ private:
 
     std::map<uint64_t, ClientDelayStats> _client_delay_stats;
 
-    uint32_t _last_state_seq = 0;
+    // last state-publish timestamp: consumed by the 'health' service (state freshness). The other
+    // per-message counters (state/cmd seq, publish count, session id, recv time) were removed with
+    // the unused cmd_stats/state_stats services.
     uint64_t _last_state_publish_ns = 0;
-    uint64_t _state_publish_count = 0;
-
-    uint32_t _last_cmd_seq = 0;
-    uint64_t _last_cmd_recv_ns = 0;
-    uint64_t _last_cmd_session_id = 0;
 
 };
 

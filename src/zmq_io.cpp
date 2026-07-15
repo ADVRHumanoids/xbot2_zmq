@@ -12,13 +12,17 @@ uint64_t monotonic_ns() {
 
 using namespace XBot;
 
-void ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
+DelayWarn ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
+    // RT-safe: pure computation, no logging/I/O. Returns the anomalies for the caller to jwarn.
+    DelayWarn w;
+    bool had_prev = last_update_ns != 0;
     uint64_t now_ns = monotonic_ns();
     int64_t ipt_ns = last_update_ns == 0 ? 0 : static_cast<int64_t>(now_ns - last_update_ns);
     last_update_ns = now_ns;
     int packets_since_last = seq - last_seq;
+    w.packets_since_last = packets_since_last;
     if (packets_since_last > 1)
-        std::cout << "Warning: Missed " << packets_since_last - 1 << " packets from client." << std::endl;
+        w.missed_packets = packets_since_last - 1;
     last_seq = seq;
 
     sum -= delays_ns[head];
@@ -47,10 +51,20 @@ void ClientDelayStats::update(int64_t delay_ns, uint32_t seq) {
 
     double max_std_deviation = 5;
     if (std::abs(delay_ns - avg_delay_ns) > max_std_deviation * jitter_ns)
-        std::cout << "Abnormal client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms, pkgs since last: " << packets_since_last << ")" << std::endl;
-    if (last_update_ns != 0 && std::abs(ipt_ns - avg_inter_packet_ns) > max_std_deviation * inter_packet_jitter_ns)
-        std::cout << "Abnormal inter-packet time: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms)" << std::endl;
-    // std::cout << "Client delay: " << delay_ns * 1e-6 << " ms (avg: " << avg_delay_ns * 1e-6 << " ms, jitter: " << jitter_ns * 1e-6 << " ms), inter-packet: " << ipt_ns * 1e-6 << " ms (avg: " << avg_inter_packet_ns * 1e-6 << " ms, jitter: " << inter_packet_jitter_ns * 1e-6 << " ms), skipped: " << packets_since_last - 1 << std::endl;
+    {
+        w.abnormal_delay = true;
+        w.delay_ms = delay_ns * 1e-6;
+        w.avg_delay_ms = avg_delay_ns * 1e-6;
+        w.jitter_ms = jitter_ns * 1e-6;
+    }
+    if (had_prev && std::abs(ipt_ns - avg_inter_packet_ns) > max_std_deviation * inter_packet_jitter_ns)
+    {
+        w.abnormal_inter_packet = true;
+        w.ipt_ms = ipt_ns * 1e-6;
+        w.avg_ipt_ms = avg_inter_packet_ns * 1e-6;
+        w.ipt_jitter_ms = inter_packet_jitter_ns * 1e-6;
+    }
+    return w;
 }
 
 void ClientDelayStats::reset(uint32_t initial_seq)
@@ -280,9 +294,7 @@ void ZmqIO::publish_state()
 
     std::vector<uint8_t> raw_msg = build_state_msg_raw(imu_names, joints_state, joints_num, imus_state);
     raw_publisher->send(zmq::buffer(raw_msg), zmq::send_flags::none);
-    _last_state_seq = seq - 1;
-    _last_state_publish_ns = monotonic_ns();
-    _state_publish_count++;
+    _last_state_publish_ns = monotonic_ns(); // consumed by the 'health' service (state freshness)
 }
 
 void ZmqIO::handle_request_response()
@@ -357,30 +369,11 @@ void ZmqIO::handle_request_response()
             }
             resp_yaml["success"] = Hal::JointSafety::enable_filter(enabled, cutoff_hz);
         }
-        else if(req_type == "plugin_status")
-        {
-            std::string plugin_name;
-            if(req_yaml["plugin"] && req_yaml["plugin"].IsScalar()) {
-                plugin_name = req_yaml["plugin"].as<std::string>();
-            } else {
-                resp_yaml["message"] = "missing or invalid 'plugin' field";
-                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
-                return;
-            }
-            Runnable::State plugin_state;
-            const bool status_ok = getPluginState(plugin_name, plugin_state);
-            resp_yaml["success"] = status_ok;
-            if(status_ok)
-            {
-                resp_yaml["data"]["state"] = Runnable::StateAsString(plugin_state);
-            }
-            else
-            {
-                resp_yaml["message"] = "failed to read plugin state for '" + plugin_name + "'";
-            }
-        }
         else if(req_type == "plugin_command")
         {
+            // NEUTERED: a ZMQ client must not have authority to start/stop/abort RT plugins.
+            // The request parsing is kept and the original dispatch is left commented out for
+            // reference; the handler performs no action and always reports failure.
             std::string plugin_name;
             std::string command_name;
             if(req_yaml["plugin"] && req_yaml["plugin"].IsScalar()) {
@@ -397,72 +390,30 @@ void ZmqIO::handle_request_response()
                 req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
                 return;
             }
-
-            Runnable::Command command;
-            if(command_name == "start") {
-                command = Runnable::Command::Start;
-            } else if(command_name == "stop") {
-                command = Runnable::Command::Stop;
-            } else if(command_name == "abort") {
-                command = Runnable::Command::Abort;
-            } else {
-                resp_yaml["message"] = "invalid plugin command '" + command_name + "'";
-                req_resp_socket->send(zmq::buffer(YAML::Dump(resp_yaml)), zmq::send_flags::none);
-                return;
-            }
-
-            const bool command_ok = sendCommand(plugin_name, command);
-            resp_yaml["success"] = command_ok;
-            if(!command_ok)
-            {
-                resp_yaml["message"] = "failed to send '" + command_name + "' to plugin '" + plugin_name + "'";
-            }
-        }
-        else if(req_type == "safety_status")
-        {
-            auto safety_status = Hal::JointSafety::status();
-            resp_yaml["success"] = true;
-            resp_yaml["data"]["safety_enabled"] = safety_status.safety_enabled;
-            resp_yaml["data"]["filter_enabled"] = safety_status.filter_enabled;
-            resp_yaml["data"]["cutoff_hz"] = safety_status.cutoff_hz;
-            resp_yaml["data"]["safety_triggered"] = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
+            // Runnable::Command command;
+            // if(command_name == "start")      command = Runnable::Command::Start;
+            // else if(command_name == "stop")  command = Runnable::Command::Stop;
+            // else if(command_name == "abort") command = Runnable::Command::Abort;
+            // else { invalid command }
+            // const bool command_ok = sendCommand(plugin_name, command);
+            resp_yaml["success"] = false;
+            resp_yaml["message"] = "plugin_command is not permitted from the ZMQ client";
         }
         else if(req_type == "safety_restore")
         {
-            const bool restore_ok = Hal::JointSafety::restore();
-            resp_yaml["success"] = restore_ok;
-            if(!restore_ok)
-            {
-                resp_yaml["message"] = "failed to restore XBot joint safety";
-            }
-        }
-        else if(req_type == "state_stats")
-        {
-            uint64_t now_ns = monotonic_ns();
-            resp_yaml["success"] = true;
-            resp_yaml["data"]["last_seq"] = _last_state_seq;
-            resp_yaml["data"]["publish_count"] = static_cast<unsigned long long>(_state_publish_count);
-            resp_yaml["data"]["last_publish_monotonic_ns"] = static_cast<unsigned long long>(_last_state_publish_ns);
-            resp_yaml["data"]["last_publish_age_s"] = _last_state_publish_ns > 0 ?
-                static_cast<double>(now_ns - _last_state_publish_ns) * 1e-9 : -1.0;
-        }
-        else if(req_type == "cmd_stats")
-        {
-            uint64_t now_ns = monotonic_ns();
-            const bool timeout_active = cmd_timeout.time_since_epoch().count() != 0;
-            resp_yaml["success"] = true;
-            resp_yaml["data"]["last_seq"] = _last_cmd_seq;
-            resp_yaml["data"]["last_session_id"] = static_cast<unsigned long long>(_last_cmd_session_id);
-            resp_yaml["data"]["last_recv_monotonic_ns"] = static_cast<unsigned long long>(_last_cmd_recv_ns);
-            resp_yaml["data"]["last_recv_age_s"] = _last_cmd_recv_ns > 0 ?
-                static_cast<double>(now_ns - _last_cmd_recv_ns) * 1e-9 : -1.0;
-            resp_yaml["data"]["consecutive_steps"] = cmd_consecutive_steps;
-            resp_yaml["data"]["timeout_active"] = timeout_active;
-            resp_yaml["data"]["timeout_remaining_s"] = timeout_active ?
-                std::chrono::duration<double>(cmd_timeout - chrono::steady_clock::now()).count() : 0.0;
+            // NEUTERED: a ZMQ client must not have authority to clear a latched joint-safety
+            // trigger; that must be an explicit, local operator action. Handler kept for reference
+            // with the actual restore commented out.
+            // const bool restore_ok = Hal::JointSafety::restore();
+            resp_yaml["success"] = false;
+            resp_yaml["message"] = "safety_restore is not permitted from the ZMQ client";
         }
         else if(req_type == "health")
         {
+            // Single liveness + safety report. Folds in what the removed 'safety_status' service
+            // returned. Every field here has a consumer in the adarl adapters (safety_triggered,
+            // zmq_io_state{,_ok}, state_last_publish_age_s) plus the safety detail
+            // (safety_enabled / filter_enabled / filter_cutoff_hz).
             uint64_t now_ns = monotonic_ns();
             auto safety_status = Hal::JointSafety::status();
             Runnable::State plugin_state;
@@ -474,15 +425,8 @@ void ZmqIO::handle_request_response()
             resp_yaml["data"]["filter_enabled"] = safety_status.filter_enabled;
             resp_yaml["data"]["filter_cutoff_hz"] = safety_status.cutoff_hz;
             resp_yaml["data"]["safety_triggered"] = _safety_flag && _safety_flag->load(std::memory_order_relaxed);
-            resp_yaml["data"]["state_last_seq"] = _last_state_seq;
-            resp_yaml["data"]["state_publish_count"] = static_cast<unsigned long long>(_state_publish_count);
             resp_yaml["data"]["state_last_publish_age_s"] = _last_state_publish_ns > 0 ?
                 static_cast<double>(now_ns - _last_state_publish_ns) * 1e-9 : -1.0;
-            resp_yaml["data"]["cmd_last_seq"] = _last_cmd_seq;
-            resp_yaml["data"]["cmd_last_session_id"] = static_cast<unsigned long long>(_last_cmd_session_id);
-            resp_yaml["data"]["cmd_last_recv_age_s"] = _last_cmd_recv_ns > 0 ?
-                static_cast<double>(now_ns - _last_cmd_recv_ns) * 1e-9 : -1.0;
-            resp_yaml["data"]["cmd_timeout_active"] = cmd_timeout.time_since_epoch().count() != 0;
         }
         else {
             jerror("unknown request type: {}", req_type);
@@ -613,7 +557,20 @@ void ZmqIO::recv_cmd_v3()
 
             uint64_t now_ns = monotonic_ns();
             if(cmd_consecutive_steps > 0)
-                _client_delay_stats[client_session_id].update(static_cast<int64_t>((now_ns - stamp_ns)), seq);
+            {
+                // Command-stream quality diagnostics (transport delay, rate jitter, packet loss).
+                // Not used for control; logged via the RT-safe jwarn only on an anomaly.
+                DelayWarn w = _client_delay_stats[client_session_id].update(
+                    static_cast<int64_t>((now_ns - stamp_ns)), seq);
+                if(w.missed_packets > 0)
+                    jwarn("missed {} command packet(s) from client", w.missed_packets);
+                if(w.abnormal_delay)
+                    jwarn("abnormal client delay: {:.3f} ms (avg {:.3f}, jitter {:.3f}, pkgs since last {})",
+                          w.delay_ms, w.avg_delay_ms, w.jitter_ms, w.packets_since_last);
+                if(w.abnormal_inter_packet)
+                    jwarn("abnormal inter-packet time: {:.3f} ms (avg {:.3f}, jitter {:.3f})",
+                          w.ipt_ms, w.avg_ipt_ms, w.ipt_jitter_ms);
+            }
             else
                 _client_delay_stats[client_session_id].reset(seq);
 
@@ -671,10 +628,6 @@ void ZmqIO::recv_cmd_v3()
                 j->setDamping(Eigen::Scalard(joint_cmd_vec[4]));
                 j->setControlMode(static_cast<ControlMode::Type>(joints_ctrl_vec[0]));
             }
-
-            _last_cmd_seq = seq;
-            _last_cmd_session_id = client_session_id;
-            _last_cmd_recv_ns = now_ns;
 
             cmd_timeout = chrono::steady_clock::now() + 1s;
             cmd_consecutive_steps++;

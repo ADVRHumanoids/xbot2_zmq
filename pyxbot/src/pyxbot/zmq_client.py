@@ -355,27 +355,15 @@ class XbotZmqClient:
         """Set the server-side low-pass filter cutoff frequency for joint states."""
         self._request_data({"type": "set_filter_frequency_hz", "enabled": enabled, "cutoff_hz": cutoff_freq})
 
-    def get_plugin_status(self, plugin: str = "zmq_io", timeout_s: float = 1.0) -> str:
-        return self._request_data({"type": "plugin_status", "plugin": plugin}, timeout_s=timeout_s)["state"]
-
-    def plugin_command(self, plugin: str, command: str, timeout_s: float = 1.0):
-        if command not in ("start", "stop", "abort"):
-            raise ValueError(f"Invalid plugin command '{command}'")
-        self._request_data({"type": "plugin_command", "plugin": plugin, "command": command}, timeout_s=timeout_s)
-
-    def get_safety_status(self, timeout_s: float = 1.0) -> dict:
-        return self._request_data({"type": "safety_status"}, timeout_s=timeout_s)
-
-    def restore_safety(self, timeout_s: float = 1.0):
-        self._request_data({"type": "safety_restore"}, timeout_s=timeout_s)
-
-    def get_state_stats(self, timeout_s: float = 1.0) -> dict:
-        return self._request_data({"type": "state_stats"}, timeout_s=timeout_s)
-
-    def get_cmd_stats(self, timeout_s: float = 1.0) -> dict:
-        return self._request_data({"type": "cmd_stats"}, timeout_s=timeout_s)
-
     def get_health(self, timeout_s: float = 1.0) -> dict:
+        """Single liveness + safety report from the server.
+
+        Fields: zmq_io_state_ok, zmq_io_state, safety_enabled, filter_enabled, filter_cutoff_hz,
+        safety_triggered, state_last_publish_age_s. This is the one place safety and liveness are
+        reported; the former separate 'safety_status'/'state_stats'/'cmd_stats' services were folded
+        away. 'plugin_status'/'plugin_command' (client plugin control) and 'restore_safety' were
+        removed / neutered server-side (a client must not have that authority).
+        """
         return self._request_data({"type": "health"}, timeout_s=timeout_s)
 
     def _get_urdf_remote(self) -> str:
