@@ -479,6 +479,15 @@ class XbotZmqClient:
                     break
                     # self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_proto(msg)
                 except zmq.Again:
+                    if blocking:
+                        # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} No joint state message available yet after {time.monotonic() - t0:.3f} seconds...")
+                        remainingtime = timeout_s - (time.monotonic() - t0)
+                        if remainingtime <=0:
+                            raise TimeoutError(f"Timeout while waiting for joint state message after {timeout_s} seconds")
+                        polling_max_dur_ms = int(min(10, remainingtime*1000)) if timeout_s != float("+inf") else None
+                        self._robotstate_socket.poll(timeout=polling_max_dur_ms) # wait max 10ms for new messages to arrive, then manually check again.
+                    else:
+                        return False # no message available, but we are non-blocking
                     # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} No joint state message available yet after {time.monotonic() - t0:.3f} seconds...")
                     remainingtime = timeout_s - (time.monotonic() - t0)
                     if remainingtime <=0:
