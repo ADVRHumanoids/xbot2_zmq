@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.8)
 project(xbot2_zmq VERSION 1.0.0)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

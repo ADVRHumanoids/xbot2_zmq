@@ -2,9 +2,7 @@ import zmq
 import yaml
 import time
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 from typing import List, Sequence
-import pprint
 
 from dataclasses import dataclass
 import gc
@@ -69,7 +67,7 @@ class JointState():
         """
         self._joint_states_ppvvettpvekd = ppvvettpvekd
         self._joint_states_ppvvettpvekd.flags.writeable = False
-        self._pve_idx = np.array([0,3,4])
+        self._pve_idx = np.array([0,3,4]) # we get motor-side joint velocity (higher resolution, less noise on real robot)
         self._pvesd_refs_idx = np.array([7,8,9,10,11])
 
     def data(self) -> np.ndarray:
@@ -77,7 +75,8 @@ class JointState():
         return self._joint_states_ppvvettpvekd
 
     def pve(self) -> np.ndarray:
-        """Return columns [pos_joint, vel_motor, eff] as shape (N, 3)."""
+        """Return columns [pos_joint, motor-side vel_joint, eff] as shape (N, 3)."""
+        
         return self._joint_states_ppvvettpvekd[:, self._pve_idx]
 
     def pvesd_refs(self) -> np.ndarray:
@@ -241,6 +240,10 @@ class XbotZmqClient:
         self._ipc_pub_path = ipc_pub_path
         self._ipc_cmd_path = ipc_cmd_path
         self._ipc_rep_path = ipc_service_path
+        self._request_reply_url = None
+        self._jointstates_url = None
+        self._out_cmd_url = None
+        self._context = zmq.Context.instance()
         self._next_joint_cmd = JointsCommand(joint_names=[], pvesd=np.zeros((0,5)), ctrl_mode=np.zeros((0,1), dtype=np.int32))
         self._last_msg_seq = 0
         self._last_msg_stamp = 0.0
@@ -252,8 +255,17 @@ class XbotZmqClient:
         self._last_joints_state_arr : np.ndarray = None
         self._last_imu_state_arr : np.ndarray = None
         self._imu_states : dict[str,np.ndarray] = {}
-        self._floating_base = True
         self._client_session_id = np.array([np.random.randint(0, np.iinfo(np.uint64).max, dtype=np.uint64)], dtype=np.uint64)
+
+    def _resolve_urls(self):
+        if self._protocol == 'tcp':
+            self._request_reply_url = f"tcp://{self._remote_ip}:{self._tcp_service_port}"
+            self._jointstates_url   = f"tcp://{self._remote_ip}:{self._tcp_pub_port}"
+            self._out_cmd_url       = f"tcp://{self._remote_ip}:{self._tcp_cmd_port}"
+        else:
+            self._request_reply_url = f"ipc://{self._ipc_rep_path}"
+            self._jointstates_url   = f"ipc://{self._ipc_pub_path}"
+            self._out_cmd_url       = f"ipc://{self._ipc_cmd_path}"
 
     def start(self) -> "XbotZmqClient":
         """Connect to the xbot2 server and fetch joint/IMU metadata.
@@ -267,17 +279,7 @@ class XbotZmqClient:
         XbotZmqClient
             ``self``, to allow chaining: ``client = XbotZmqClient().start()``.
         """
-        if self._protocol == 'tcp':
-            self._request_reply_url = f"tcp://{self._remote_ip}:{self._tcp_service_port}"
-            self._jointstates_url   = f"tcp://{self._remote_ip}:{self._tcp_pub_port}"
-            self._out_cmd_url       = f"tcp://{self._remote_ip}:{self._tcp_cmd_port}"
-        else:
-            self._request_reply_url = f"ipc://{self._ipc_rep_path}"
-            self._jointstates_url   = f"ipc://{self._ipc_pub_path}"
-            self._out_cmd_url       = f"ipc://{self._ipc_cmd_path}"
-        context = zmq.Context()
-        self._request_reply_socket = context.socket(zmq.REQ)
-        self._request_reply_socket.connect(self._request_reply_url)
+        self._resolve_urls()
         if self._verbose:
             print(f"Connected to request-reply socket at {self._request_reply_url}")
 
@@ -295,14 +297,14 @@ class XbotZmqClient:
         if self._verbose:
             print(f"Got IMU names: {self._imu_names}")
 
-        self._jointstates_socket = context.socket(zmq.SUB)
+        self._jointstates_socket = self._context.socket(zmq.SUB)
         self._jointstates_socket.setsockopt(zmq.CONFLATE, 1)  # last msg only. IMPORTANT! this must be before connect!
         self._jointstates_socket.subscribe("")  # Subscribe to all topics
         self._jointstates_socket.connect(self._jointstates_url)
         if self._verbose:
             print(f"Connected to joint states socket at {self._jointstates_url}")
 
-        self._out_cmd_socket = context.socket(zmq.PUB)
+        self._out_cmd_socket = self._context.socket(zmq.PUB)
         self._out_cmd_socket.connect(self._out_cmd_url)
         if self._verbose:
             print(f"Connected to command socket at {self._out_cmd_url}")
@@ -310,49 +312,66 @@ class XbotZmqClient:
         self._urdf = self._get_urdf_remote()
         return self
 
-    def _send_request(self, request : dict) -> dict:
-        """Send a YAML-encoded request dict over the REQ socket and return the parsed response."""
-        self._request_reply_socket.send_string(yaml.dump(request))
-        response_str = self._request_reply_socket.recv_string()
-        response = yaml.safe_load(response_str)
-        return response
+    def _send_request(self, request : dict, timeout_s: float = 5.0) -> dict:
+        """Send a YAML-encoded request dict and return the parsed response.
+
+        A fresh REQ socket is used for each request so timeouts do not poison a
+        long-lived request socket.
+        """
+        if self._request_reply_url is None:
+            self._resolve_urls()
+        socket = self._context.socket(zmq.REQ)
+        timeout_ms = max(1, int(timeout_s * 1000))
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        try:
+            socket.connect(self._request_reply_url)
+            socket.send_string(yaml.dump(request))
+            response_str = socket.recv_string()
+            response = yaml.safe_load(response_str)
+            return response or {}
+        finally:
+            socket.close()
+
+    def _request_data(self, request: dict, timeout_s: float = 5.0):
+        response = self._send_request(request, timeout_s=timeout_s)
+        if not response.get("success", False):
+            raise RuntimeError(response.get("message", f"request failed: {request}"))
+        return response.get("data")
 
     def _get_joint_names_remote(self):
         """Fetch the ordered list of joint names from the server."""
-        response = self._send_request({"type": "joint_names"})
-        names = response["data"]
-        if self._floating_base:
-            names = names[1:]  # Remove the floating base joint
+        names = self._request_data({"type": "joint_names"})
+        if self._verbose:
+            print(f"Received joint names from server: {names}")
         return names
 
     def _get_imu_names_remote(self):
         """Fetch the ordered list of IMU names from the server."""
-        response = self._send_request({"type": "imu_names"})
-        return response["data"]
+        return self._request_data({"type": "imu_names"})
 
     def set_filter_frequency_hz(self, cutoff_freq, enabled=True):
-        """Set the server-side low-pass filter cutoff frequency for joint states.
+        """Set the server-side low-pass filter cutoff frequency for joint states."""
+        self._request_data({"type": "set_filter_frequency_hz", "enabled": enabled, "cutoff_hz": cutoff_freq})
 
-        Parameters
-        ----------
-        cutoff_freq : float
-            Cutoff frequency in Hz.
-        enabled : bool
-            Whether to enable the filter. Pass ``False`` to disable it.
+    def get_plugin_status(self, plugin: str = "zmq_io", timeout_s: float = 1.0) -> str:
+        return self._request_data({"type": "plugin_status", "plugin": plugin}, timeout_s=timeout_s)["state"]
+    
+    def get_status(self, timeout_s: float = 1.0) -> dict:
+        """Single liveness + safety report from the server.
 
-        Raises
-        ------
-        RuntimeError
-            If the server reports failure.
+        Fields: zmq_io_state_ok, zmq_io_state, safety_enabled, filter_enabled, filter_cutoff_hz,
+        safety_triggered, state_last_publish_age_s. This is the one place safety and liveness are
+        reported; the former separate 'safety_status'/'state_stats'/'cmd_stats' services were folded
+        away. 'plugin_status'/'plugin_command' (client plugin control) and 'restore_safety' were
+        removed / neutered server-side (a client must not have that authority).
         """
-        resp = self._send_request({"type": "set_filter_frequency_hz", "enabled": enabled, "cutoff_hz": cutoff_freq})
-        if not resp["success"]:
-            raise RuntimeError("Failed to set filter frequency, reason: " + resp["message"])
+        return self._request_data({"type": "status"}, timeout_s=timeout_s)
 
     def _get_urdf_remote(self) -> str:
         """Fetch the robot URDF string from the server."""
-        response = self._send_request({"type": "urdf"})
-        return response["data"]
+        return self._request_data({"type": "urdf"})
 
     def get_urdf(self) -> str:
         """Return the robot URDF string retrieved at startup."""
@@ -482,6 +501,17 @@ class XbotZmqClient:
         This is an estimate, only use it a lower bound (age is at least this much)"""
         return self._delta_estimator.age(self._last_msg_stamp) if self._last_msg_rec_time != float("-inf") else None
 
+    def wait_for_state_stream(self, timeout_s: float, min_seq_delta: int = 1):
+        initial_seq = self._last_msg_seq
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError(f"Timeout while waiting for xbot2_zmq state stream after {timeout_s} seconds")
+            self.sense(timeout_s=min(remaining, 0.1))
+            if self._last_msg_seq - initial_seq >= min_seq_delta:
+                return
+
     def _build_command_raw(self) -> bytes:
         """Build a raw bytes command using the current client state and following the recv_cmd_v3 format:
           - seq                 : 1 x uint32
@@ -495,22 +525,19 @@ class XbotZmqClient:
 
         cmd = self._next_joint_cmd
         stamp_ns = self._cmd_stamp_ns
-
-        if cmd.pvesd.shape != (self._joints_num, 5):
-            raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(self._joints_num, 5)}")
-        if cmd.ctrl_mode.shape != (self._joints_num, 1):
-            raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(self._joints_num, 1)}")
-
         jnames = cmd.joint_names if cmd.joint_names is not None else self._joint_names
         joints_num = len(jnames)
+
+        if cmd.pvesd.shape != (joints_num, 5):
+            raise ValueError(f"Invalid pvesd shape: {cmd.pvesd.shape}, expected: {(joints_num, 5)}")
+        if cmd.ctrl_mode.shape != (joints_num, 1):
+            raise ValueError(f"Invalid ctrl_mode shape: {cmd.ctrl_mode.shape}, expected: {(joints_num, 1)}")
 
         seq_arr = np.array([self._cmd_seq], dtype=np.uint32, order='C')
         stamp_arr = np.array([stamp_ns], dtype=np.uint64, order='C') # convert seconds to nanoseconds
         joints_num_arr = np.array([joints_num], dtype=np.uint32, order='C')
         client_session_id_arr = self._client_session_id
         joint_ids = np.array([self._joint_names_to_idx[n] for n in jnames], dtype=np.uint32, order='C')
-        if self._floating_base:
-            joint_ids = joint_ids + 1 # shift by one to account for the floating base joint at index 0
         pvesd = cmd.pvesd.astype(np.float64, order='C')
         ctrl  = cmd.ctrl_mode.flatten().astype(np.int32, order='C')
         return (  seq_arr.tobytes()
@@ -536,7 +563,7 @@ class XbotZmqClient:
     #     return joint_cmd
 
     def move(self):
-        """Send the next joint command to the robot. The command is set by calling :meth:`set_command`
+        """Send the next joint command to the robot. The command is set by calling :meth:`set_command`.
         You can also set and send in one call using :meth:`send_command`."""
         # cmd_msg =  proto_msgs.GenericRxMsg()
         # cmd_msg.stamp = int(time.time() * 1e9)

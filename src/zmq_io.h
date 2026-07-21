@@ -1,7 +1,9 @@
 #include <xbot2/rt_plugin/control_plugin.h>
 #include <zmq.hpp>
+#include <atomic>
 #include <deque>
 #include <map>
+#include <memory>
 #include <cmath>
 
 typedef double DoubleType;
@@ -11,6 +13,18 @@ static_assert(sizeof(DoubleType) == 8, "DoubleType is not 64 bits");
 static_assert(sizeof(IntType) == 4, "IntType is not 32 bits");
 
 namespace XBot {
+
+/**
+ * Anomaly report returned by ClientDelayStats::update()
+ */
+struct DelayStatus {
+    int missed_packets = 0;             // >0  -> packets lost since the previous command
+    bool abnormal_delay = false;        // transport delay > 5 sigma over the running mean
+    bool abnormal_inter_packet = false; // gap between packets > 5 sigma (client rate jitter)
+    int packets_since_last = 0;
+    double delay_ms = 0.0, avg_delay_ms = 0.0, jitter_ms = 0.0;
+    double ipt_ms = 0.0, avg_ipt_ms = 0.0, ipt_jitter_ms = 0.0;
+};
 
 struct ClientDelayStats {
     static constexpr size_t WINDOW = 100;
@@ -27,7 +41,10 @@ struct ClientDelayStats {
     uint32_t last_seq = 0;
     uint64_t last_update_ns = 0;
 
-    void update(int64_t delay_ns, uint32_t seq);
+    /**
+     * Updates the running windows and RETURNS the anomalies detected.
+     */
+    DelayStatus update(int64_t delay_ns, uint32_t seq);
 
     void reset(uint32_t initial_seq);
 };
@@ -50,6 +67,7 @@ private:
     void getJointPosition(Eigen::Ref<Eigen::VectorXd> out) const;
     void getMotorPosition(Eigen::Ref<Eigen::VectorXd> out) const;
     void getJointPositionReference(Eigen::Ref<Eigen::VectorXd> out) const;
+    std::vector<std::string> getStateJointNames() const;
     void readToMat(const std::string& data_str, Eigen::Ref<Eigen::MatrixXd> out,
                       int rows, int cols);
     void readToMat(const std::string& data_str, Eigen::Ref<Eigen::MatrixXi> out,
@@ -64,6 +82,7 @@ private:
                                     Eigen::Ref<Eigen::MatrixXd> imus_state);
     std::unique_ptr<zmq::context_t> context;
     std::unique_ptr<zmq::socket_t> cmd_subscriber, req_resp_socket, raw_publisher;
+    std::shared_ptr<std::atomic_bool> _safety_flag;
 
     uint32_t seq = 0;
     JointNameMap jmap;
@@ -72,6 +91,8 @@ private:
     long cmd_consecutive_steps = 0;
 
     std::map<uint64_t, ClientDelayStats> _client_delay_stats;
+
+    uint64_t _last_state_publish_ns = 0;
 
 };
 
