@@ -280,8 +280,8 @@ class XbotZmqClient:
             ``self``, to allow chaining: ``client = XbotZmqClient().start()``.
         """
         self._resolve_urls()
-        if self._verbose:
-            print(f"Connected to request-reply socket at {self._request_reply_url}")
+        # if self._verbose:
+        #     print(f"Connected to request-reply socket at {self._request_reply_url}")
 
         self._joint_names : List[str] = self._get_joint_names_remote()
         self._joints_num = len(self._joint_names)

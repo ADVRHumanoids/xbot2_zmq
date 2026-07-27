@@ -8,4 +8,4 @@ uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-dev#subdi
 
 You will need to have the correct zmq_io running on Xbot [xbot2_zmq](../README.md)
 
-You can find an example of some basic usage in src/pyxbot/example.py 
+You can find an example of some basic usage in [src/pyxbot/example.py](./src/pyxbot/example.py) 
