@@ -1,6 +1,9 @@
 # XBot2_zmq & Pyxbot
 
-This repo provides a XBot2 plugin (zmq_io) exposing a ZMQ-based API, allowing to communicate with XBot without using ROS, and a python package [pyxbot](pyxbot/README.md), providing a friendly python interface.
+This repo provides the tools to communicate with XBot without using ROS. This is done through two components:
+* **zmq_io**: a XBot2 plugin which exposes a ZMQ-based robot API
+* **[pyxbot](pyxbot/README.md)**: a python package providing a friendly python interface for zmq_io
+
 
 The underlying communication happens over 3 different channels:
 * The current robot state (Joint States and IMU) is streamed over a raw bytes connection
