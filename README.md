@@ -1,23 +1,37 @@
-# xbot2_zmq - No proto version
+# XBot2_zmq & Pyxbot
 
-A XBot2 plugin exporting a ZMQ-based API.
+This repo provides a XBot2 plugin (zmq_io) exposing a ZMQ-based API, allowing to communicate with XBot without using ROS, and a python package [pyxbot](pyxbot/README.md), providing a friendly python interface.
 
-It communicates over 3 different channels:
-
+The underlying communication happens over 3 different channels:
 * The current robot state (Joint States and IMU) is streamed over a raw bytes connection
 * Joint commands are received over a second raw bytes connection
 * A third connection is dedicated to a reply/request channel where info is sent as YAML messages
 
 
-## How to load in XBot
-(TBD)
+## Python interface
+
+A python interface is available as a pip-installable package in the pyxbot subfolder.
+You can install it with:
+
+```
+uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-dev#subdirectory=pyxbot
+```
+
+You can find more info in the [README](pyxbot/README.md)
+
+
+## How to load the XBot plugin
+
+The XBot plugin name is zmq_io.
+After building and installing it you can load it in XBot by adding it to the config as follows.
+
 ```yaml
 zmq_io:
   type: zmq_io
   thread: nrt_main
-  parameters:
+  params:
     autostart: true
-    protocol: ipc # either tcp or ipc
+    protocol: tcp # either tcp or ipc
     tcp_state_port: 5559
     tcp_cmd_port: 5558
     tcp_service_port: 5557 
@@ -27,22 +41,10 @@ zmq_io:
     
 ```
 
-
-## Python interface
-
-A python interface is available as a pip-installable package in the folder pyxbot.
-You can install it with:
-
-```
-uv pip install git+https://github.com/ADVRHumanoids/xbot2_zmq.git@crzz-dev#subdirectory=pyxbot
-```
-
-You can find more info in the package [README](pyxbot/README.md)
-
-
 ## Installation
 
-You can use the build script build_and_install_systemwide.sh to build and install, you can pass a
-path with --install-dir to specify the installation folder.
+The XBot plugin can be built with CMake.
+You can also use the standalone build script [build_and_install_systemwide.sh](build_and_install_systemwide.sh) to build and install, you can pass a
+path with --install-dir to specify the installation folder (e.g. a forest install directory).
 
 
