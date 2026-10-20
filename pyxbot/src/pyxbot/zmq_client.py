@@ -205,7 +205,7 @@ class XbotZmqClient:
                         ipc_pub_path : str = '/tmp/xbot2_zmq_pub.ipc',
                         ipc_cmd_path : str = '/tmp/xbot2_zmq_cmd.ipc',
                         ipc_service_path : str = '/tmp/xbot2_zmq_rep.ipc',
-                        verbose : bool = False):
+                        verbose : bool = True):
         """ Initialize the client, call start() before using it.
 
         Parameters
@@ -400,9 +400,10 @@ class XbotZmqClient:
         imus_elem_num = self._imus_num * 10 # number of elements in the IMUs state matrix
         imus_state_size = imus_elem_num * dsize # size of the IMUs state matrix in bytes
         expected_size = header_size + joints_state_size + imus_state_size
-        if len(msg) != expected_size:
-            raise ValueError(f"Unexpected message size: {len(msg)} bytes, expected: {expected_size} bytes. expected joints count: {self._joints_num}, expected imus count: {self._imus_num}")
 
+        if len(msg) < header_size:
+            raise ValueError(f"Unexpected message size: {len(msg)} bytes, smaller than header! Expected at least {header_size} bytes.")
+        
         offset = 0
         seq       = np.frombuffer(msg, dtype=np.int32,   count=1, offset=offset)[0]
         offset += isize
@@ -417,6 +418,9 @@ class XbotZmqClient:
             raise ValueError(f"Unexpected joints count in message: {joints_num}, expected: {self._joints_num}")
         if imus_num != self._imus_num:
             raise ValueError(f"Unexpected IMUs count in message: {imus_num}, expected: {self._imus_num}")
+
+        if len(msg) != expected_size:
+            raise ValueError(f"Unexpected message size: {len(msg)} bytes, expected: {expected_size} bytes. expected joints count: {self._joints_num}, expected imus count: {self._imus_num}")
 
         joints_state_arr = np.frombuffer(msg, dtype=np.float64, count=joints_elem_num, offset=offset).reshape((joints_num, 12), order='C')
         offset += joints_num * 12 * dsize

@@ -145,9 +145,7 @@ void ZmqIO::getJointPosition(Eigen::Ref<Eigen::VectorXd> out) const
     Eigen::VectorXd tmp_buffer;
     Eigen::VectorXd tmp_buffer2;
 
-    int joints_num = _robot->getJointNum();
-    if(_robot->isFloatingBase())
-        joints_num -= 1;
+    int joints_num = getStateJointNum();
 
     _robot->getJointPosition(tmp_buffer);
     _robot->positionToMinimal(tmp_buffer, tmp_buffer2);
@@ -160,9 +158,7 @@ void ZmqIO::getMotorPosition(Eigen::Ref<Eigen::VectorXd> out) const
     Eigen::VectorXd tmp_buffer;
     Eigen::VectorXd tmp_buffer2;
 
-    int joints_num = _robot->getJointNum();
-    if(_robot->isFloatingBase())
-        joints_num -= 1;
+    int joints_num = getStateJointNum();
 
     _robot->getMotorPosition(tmp_buffer);
     _robot->positionToMinimal(tmp_buffer, tmp_buffer2);
@@ -175,9 +171,7 @@ void ZmqIO::getJointPositionReference(Eigen::Ref<Eigen::VectorXd> out) const
     Eigen::VectorXd tmp_buffer;
     Eigen::VectorXd tmp_buffer2;
 
-    int joints_num = _robot->getJointNum();
-    if(_robot->isFloatingBase())
-        joints_num -= 1;
+    int joints_num = getStateJointNum();
 
     _robot->getPositionReferenceFeedback(tmp_buffer);
     _robot->positionToMinimal(tmp_buffer, tmp_buffer2);
@@ -185,12 +179,18 @@ void ZmqIO::getJointPositionReference(Eigen::Ref<Eigen::VectorXd> out) const
     out = tmp_buffer2;
 }
 
-std::vector<std::string> ZmqIO::getStateJointNames() const
+int ZmqIO::getStateJointNum() const
 {
-    std::vector<std::string> names = _robot->getJointNames();
     int joints_num = _robot->getJointNum();
     if(_robot->isFloatingBase())
         joints_num -= 1;
+    return joints_num;
+}
+
+std::vector<std::string> ZmqIO::getStateJointNames() const
+{
+    std::vector<std::string> names = _robot->getJointNames();
+    int joints_num = getStateJointNum();
 
     if(names.size() > static_cast<size_t>(joints_num))
         names.erase(names.begin(), names.end() - joints_num);
@@ -255,9 +255,7 @@ void ZmqIO::publish_state()
     Eigen::VectorXd tmp_buffer;
     Eigen::VectorXd tmp_buffer2;
 
-    int joints_num = _robot->getJointNum();
-    if(_robot->isFloatingBase())
-        joints_num -= 1;
+    int joints_num = getStateJointNum();
     Eigen::Matrix<DoubleType, Eigen::Dynamic, Eigen::Dynamic, Eigen::ColMajor> joints_state(joints_num, 12);
     getJointPosition(joints_state.col(0));
     getMotorPosition(joints_state.col(1));
