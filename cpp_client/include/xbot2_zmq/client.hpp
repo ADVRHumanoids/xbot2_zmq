@@ -1,0 +1,116 @@
+#ifndef XBOT2_ZMQ_CLIENT_HPP_
+#define XBOT2_ZMQ_CLIENT_HPP_
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace xbot2_zmq {
+
+/** Where the zmq_io plugin listens. */
+struct ClientOptions {
+  std::string protocol = "ipc";  ///< "ipc" (same machine) or "tcp"
+  std::string remote_ip = "localhost";
+  int tcp_service_port = 5557;
+  int tcp_state_port = 5559;
+  int tcp_command_port = 5558;
+  std::string ipc_service_path = "/tmp/xbot2_zmq_rep.ipc";
+  std::string ipc_state_path = "/tmp/xbot2_zmq_pub.ipc";
+  std::string ipc_command_path = "/tmp/xbot2_zmq_cmd.ipc";
+};
+
+/** Columns of RobotState::joints. */
+enum JointField : std::size_t {
+  kJointPosition = 0,
+  kMotorPosition,
+  kJointVelocity,
+  kMotorVelocity,
+  kJointEffort,
+  kMotorTemperature,
+  kDriverTemperature,
+  kPositionReference,
+  kVelocityReference,
+  kEffortReference,
+  kStiffness,
+  kDamping,
+  kJointFieldCount
+};
+
+/** Columns of RobotState::imus. The quaternion is stored x, y, z, w. */
+enum ImuField : std::size_t {
+  kLinearAcceleration = 0,
+  kAngularVelocity = 3,
+  kOrientation = 6,
+  kImuFieldCount = 10
+};
+
+/** One state message. Matrices are flat and row-major. */
+struct RobotState {
+  std::int32_t seq = 0;
+  double stamp = 0.0;  ///< seconds, on the XBot2 clock
+  std::vector<double> joints;
+  std::vector<double> imus;
+};
+
+/** One command. `pvesd` is flat and row-major, N x [pos, vel, effort, K, D]. */
+struct JointsCommand {
+  std::vector<std::int32_t> joint_ids;
+  std::vector<double> pvesd;
+  std::vector<std::int32_t> ctrl_mode;
+};
+
+/** Serialize a command in the zmq_io wire format. */
+std::vector<std::uint8_t> encode_command(std::uint32_t seq,
+                                         std::uint64_t stamp_ns,
+                                         std::uint64_t client_session_id,
+                                         const JointsCommand& command);
+
+/** Parse a zmq_io state message. Throws std::invalid_argument when the size or
+ * the joint and IMU counts disagree with the expected ones. */
+void decode_state(const void* data, std::size_t size, std::size_t joints_num,
+                  std::size_t imus_num, RobotState& out);
+
+/** Client of the XBot2 zmq_io plugin.
+ *
+ * sense() and send() use separate sockets, so one thread may read the state
+ * while another sends commands. Each of the two must stay on a single thread
+ * once start() has returned. */
+class Client {
+ public:
+  explicit Client(ClientOptions options = ClientOptions());
+  ~Client();
+  Client(const Client&) = delete;
+  Client& operator=(const Client&) = delete;
+
+  /** Fetch the joint and IMU names and connect the streams. */
+  void start(double timeout_s = 5.0);
+
+  const std::vector<std::string>& joint_names() const;
+  const std::vector<std::string>& imu_names() const;
+  /** Index of a joint in the state matrix and in JointsCommand::joint_ids.
+   * Throws std::out_of_range for an unknown name. */
+  std::int32_t joint_id(const std::string& name) const;
+
+  /** Receive the newest state, waiting up to `timeout_s` (zero polls, negative
+   * waits forever). Returns false when no new state arrived. */
+  bool sense(double timeout_s = 0.0);
+  /** Newest state received by sense(). */
+  const RobotState& state() const;
+
+  /** Publish one command, stamped with the monotonic clock. */
+  void send(const JointsCommand& command);
+
+  /** YAML string of a service reply's `data` field. Throws std::runtime_error
+   * when the request times out or the server reports failure. */
+  std::string request(const std::string& type, double timeout_s = 5.0) const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace xbot2_zmq
+
+#endif  // XBOT2_ZMQ_CLIENT_HPP_
