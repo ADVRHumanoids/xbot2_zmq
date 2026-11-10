@@ -202,7 +202,8 @@ std::vector<std::string> ZmqIO::getStateJointNames() const
  * Builds a raw state message string from the provided data. The output is structured as follows:
  * - All data is in 64-bit double precision for floating-point values and 32-bit integers for integer values.
  * - First integer is the sequence number (seq).
- * - Second double is the timestamp (stamp).
+ * - Second double is the timestamp (stamp) in seconds on the XBot2 steady clock,
+ *   which follows the simulation time when XBot2 runs on it.
  * - Next comes the number of IMUs (imus_num) as an integer.
  * - Next comes the number of joints (joints_num) as an integer.
  * - Then follows the joint states matrix (joints_state) serialized in row-major order, with dimensions (joints_num x 12).
@@ -223,7 +224,7 @@ std::vector<uint8_t> ZmqIO::build_state_msg_raw(std::vector<std::string> imu_nam
     Eigen::Matrix<DoubleType, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> imus_state_rm = imus_state;
 
     IntType seq_val = static_cast<IntType>(seq++);
-    DoubleType stamp = chrono::wall_clock::now().time_since_epoch().count() * 1e-9;
+    DoubleType stamp = chrono::steady_clock::now().time_since_epoch().count() * 1e-9;
     IntType imus_num = static_cast<IntType>(imu_names.size());
     IntType joints_num_val = static_cast<IntType>(joints_num);
 
