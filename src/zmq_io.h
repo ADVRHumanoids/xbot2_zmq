@@ -95,6 +95,9 @@ private:
 
     uint64_t _last_state_publish_ns = 0;
 
+    // Clock of the state stamps: system (default) or steady.
+    bool _stamp_on_steady_clock = false;
+
 };
 
 }
