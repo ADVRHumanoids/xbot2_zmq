@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 import zmq
 
-from pyxbot.zmq_client import JointsCommand, XbotZmqClient
+from pyxbot.zmq_client import ClockDeltaEstimator, JointsCommand, XbotZmqClient
 
 try:
     import xbot2_zmq_client as cxx
@@ -138,6 +138,34 @@ class TestWireFormat(unittest.TestCase):
             cxx.encode_command(0, 0, 0, cpp_command([0, 1], np.zeros(5), [1, 1]))
 
 
+class TestClockDeltaEstimator(unittest.TestCase):
+    def test_matches_pyxbot(self):
+        rng = np.random.default_rng(0)
+        for rate, origin in ((1.0, 1.79e9), (0.5, 0.0), (0.25, 3.0), (2.0, 0.0)):
+            with self.subTest(rate=rate, origin=origin):
+                stamps = origin + 1e-3 * np.arange(3000)
+                recv = 500.0 + (stamps - origin) / rate + 3e-4 + rng.exponential(2e-4, 3000)
+                # A restart halfway: the stamps go backwards.
+                stamps[1500:] -= stamps[1500] - origin
+                recv[1500:] += 1.0
+                python = ClockDeltaEstimator()
+                cpp = cxx.ClockDeltaEstimator()
+                for i, (stamp, t) in enumerate(zip(stamps, recv)):
+                    python.update(stamp, t)
+                    cpp.update(stamp, t)
+                    if i % 97 == 0 or i == len(stamps) - 1:
+                        self.assertAlmostEqual(cpp.rate, python.rate, delta=1e-9)
+                        self.assertAlmostEqual(cpp.offset, python.offset, delta=1e-9)
+                        self.assertAlmostEqual(cpp.age(stamp, t + 0.01),
+                                               python.age(stamp, t + 0.01), delta=1e-9)
+
+    def test_invalid_window_is_rejected(self):
+        with self.assertRaises(ValueError):
+            cxx.ClockDeltaEstimator(window=1)
+        with self.assertRaises(ValueError):
+            ClockDeltaEstimator(window=1)
+
+
 class TestAgainstServer(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.TemporaryDirectory()
@@ -175,6 +203,15 @@ class TestAgainstServer(unittest.TestCase):
         np.testing.assert_array_equal(np.reshape(state.joints, (3, 12)), joints)
         np.testing.assert_array_equal(np.reshape(state.imus, (1, 10)), imus)
         self.assertFalse(self.client.sense(0.0))
+
+    def test_state_age_is_the_time_since_the_first_state(self):
+        self.assertTrue(np.isnan(self.client.state_age()))
+        self._publish(1)
+        self.assertTrue(self.client.sense(1.0))
+        time.sleep(0.05)
+        age = self.client.state_age()
+        self.assertGreaterEqual(age, 0.05)
+        self.assertLess(age, 0.5)
 
     def test_sense_keeps_only_the_newest_state(self):
         for seq in range(1, 21):

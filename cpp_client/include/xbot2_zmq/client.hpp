@@ -72,6 +72,51 @@ std::vector<std::uint8_t> encode_command(std::uint32_t seq,
 void decode_state(const void* data, std::size_t size, std::size_t joints_num,
                   std::size_t imus_num, RobotState& out);
 
+/** Maps the client's monotonic clock onto the server's clock, to estimate state
+ * ages. pyxbot's ClockDeltaEstimator, step for step.
+ *
+ * The server stamps run at rate() server seconds per client second: 1 on a robot,
+ * the real-time factor when the server runs on a simulated clock. Over a window of
+ * states, rate() is the least-squares slope of the stamps against their receive
+ * times and offset() places the line through the states received fastest. The
+ * minimum one-way latency is indistinguishable from the offset, so ages are lower
+ * bounds: the time a state has spent in transit beyond the fastest state in the
+ * window, plus the time since it arrived. The window and the fit restart when the
+ * stamps go backwards (a restarted server or simulation). */
+class ClockDeltaEstimator {
+ public:
+  explicit ClockDeltaEstimator(std::size_t window = 2000,
+                               std::size_t refit_every = 50);
+
+  /** Forget all states. */
+  void reset();
+  /** Add a state stamped `server_stamp`, received at `recv_time` (CLOCK_MONOTONIC,
+   * seconds). */
+  void update(double server_stamp, double recv_time);
+  /** Lower bound on the age of a state stamped `server_stamp` at client time `now`
+   * (CLOCK_MONOTONIC, seconds), in server seconds. */
+  double age(double server_stamp, double now) const;
+  /** Server seconds per client second. */
+  double rate() const { return rate_; }
+  /** Server time, relative to the first stamp, at the first receive time. */
+  double offset() const { return offset_; }
+
+ private:
+  void refit();
+
+  std::size_t window_;
+  std::size_t refit_every_;
+  std::vector<double> recv_;
+  std::vector<double> stamp_;
+  std::size_t count_ = 0;
+  std::size_t head_ = 0;
+  double recv_origin_ = 0.0;
+  double stamp_origin_ = 0.0;
+  double last_stamp_ = 0.0;
+  double rate_ = 1.0;
+  double offset_ = 0.0;
+};
+
 /** Client of the XBot2 zmq_io plugin.
  *
  * sense() and send() use separate sockets, so one thread may read the state
@@ -98,6 +143,10 @@ class Client {
   bool sense(double timeout_s = 0.0);
   /** Newest state received by sense(). */
   const RobotState& state() const;
+  /** Lower bound on the age of state() now, in server seconds (simulation
+   * seconds when the server runs on a simulated clock); NaN before the first
+   * state. See ClockDeltaEstimator. */
+  double state_age() const;
 
   /** Publish one command, stamped with the monotonic clock. */
   void send(const JointsCommand& command);

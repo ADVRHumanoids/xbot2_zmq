@@ -49,6 +49,17 @@ NB_MODULE(xbot2_zmq_client, m) {
         },
         nb::arg("message"), nb::arg("joints_num"), nb::arg("imus_num"));
 
+  nb::class_<ClockDeltaEstimator>(m, "ClockDeltaEstimator")
+      .def(nb::init<std::size_t, std::size_t>(), nb::arg("window") = 2000,
+           nb::arg("refit_every") = 50)
+      .def("reset", &ClockDeltaEstimator::reset)
+      .def("update", &ClockDeltaEstimator::update, nb::arg("server_stamp"),
+           nb::arg("recv_time"))
+      .def("age", &ClockDeltaEstimator::age, nb::arg("server_stamp"),
+           nb::arg("now"))
+      .def_prop_ro("rate", &ClockDeltaEstimator::rate)
+      .def_prop_ro("offset", &ClockDeltaEstimator::offset);
+
   nb::class_<Client>(m, "Client")
       .def(nb::init<ClientOptions>(), nb::arg("options") = ClientOptions())
       .def("start", &Client::start, nb::arg("timeout_s") = 5.0,
@@ -59,6 +70,7 @@ NB_MODULE(xbot2_zmq_client, m) {
       .def("sense", &Client::sense, nb::arg("timeout_s") = 0.0,
            nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro("state", &Client::state)
+      .def("state_age", &Client::state_age)
       .def("send", &Client::send, nb::arg("command"))
       .def("request", &Client::request, nb::arg("type"),
            nb::arg("timeout_s") = 5.0,

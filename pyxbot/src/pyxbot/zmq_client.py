@@ -132,36 +132,88 @@ class JointState():
                 f"           eff_ref={self.eff_ref})")
 
 class ClockDeltaEstimator:
-    """Sliding-window minimum estimator for (t_recv - t_send).
+    """Maps the client's monotonic clock onto the server's clock, to estimate state ages.
 
-    Approximates the time delta between server and client, obtaining a lower bound on 
-    true_clock_offset + one_way_latency over a rolling window. The clock delta between
-    our clock the server's and is always delta >= true_clock_offset + one_way_latency.
-    We cannot distinguish between offset and latency with this method, but we can at 
-    least approximate a lower bound on the sum of the two, which gives us a lower bound on
-    the delta.
-    This allows to check for state message ages.
-
+    The server stamps run at `rate` server seconds per client second: 1 on a robot, the
+    real-time factor when the server runs on a simulated clock. Over a window of states,
+    `rate` is the least-squares slope of the stamps against their receive times and
+    `offset` places the line through the states received fastest: a state sent at client
+    time t carries the stamp rate * t + offset, and arrives later. The minimum one-way
+    latency is indistinguishable from the offset, so ages are lower bounds: the time a
+    state has spent in transit beyond the fastest state in the window, plus the time
+    since it arrived. The window and the fit restart when the stamps go backwards (a
+    restarted server or simulation).
     """
 
-    def __init__(self, window: int = 200):
-        self._buf = np.full(window, np.inf, dtype=np.float64)
-        self._head = 0
+    def __init__(self, window: int = 2000, refit_every: int = 50):
+        if window < 2 or refit_every < 1:
+            raise ValueError("ClockDeltaEstimator needs a window of at least 2 and refit_every >= 1.")
+        self._window = window
+        self._refit_every = refit_every
+        self._recv = np.zeros(window, dtype=np.float64)
+        self._stamp = np.zeros(window, dtype=np.float64)
+        self.reset()
 
-    def update(self, server_stamp: float) -> None:
-        delta = time.monotonic() - server_stamp
-        self._buf[self._head] = delta
-        self._head = (self._head + 1) % len(self._buf)
+    def reset(self) -> None:
+        """Forget all states."""
+        self._count = 0
+        self._head = 0
+        self._recv_origin = 0.0
+        self._stamp_origin = 0.0
+        self._last_stamp = -np.inf
+        self._rate = 1.0
+        self._offset = 0.0
 
     @property
-    def min_delta(self) -> float:
-        """ The real delta is approximately at least this small"""
-        return float(np.min(self._buf))
+    def rate(self) -> float:
+        """Server seconds per client second."""
+        return self._rate
 
-    def age(self, server_stamp: float) -> float:
-        """This is an approximate lower bound on the age. The age could be higher than this,
-          but not much lower."""
-        return time.monotonic() - (server_stamp + self.min_delta)
+    @property
+    def offset(self) -> float:
+        """Server time, relative to the first stamp, at the first receive time."""
+        return self._offset
+
+    def update(self, server_stamp: float, recv_time: float = None) -> None:
+        """Add a state stamped `server_stamp`, received at `recv_time` (time.monotonic())."""
+        if recv_time is None:
+            recv_time = time.monotonic()
+        if server_stamp < self._last_stamp:
+            self.reset()
+        self._last_stamp = server_stamp
+        if self._count == 0:
+            self._recv_origin = recv_time
+            self._stamp_origin = server_stamp
+        t = recv_time - self._recv_origin
+        s = server_stamp - self._stamp_origin
+        self._recv[self._head] = t
+        self._stamp[self._head] = s
+        self._head = (self._head + 1) % self._window
+        self._count += 1
+        if self._count == 1:
+            self._offset = s - self._rate * t
+        elif self._count % self._refit_every == 0:
+            self._refit()
+        else:
+            self._offset = max(self._offset, s - self._rate * t)
+
+    def _refit(self) -> None:
+        n = min(self._count, self._window)
+        t = self._recv[:n]
+        s = self._stamp[:n]
+        dt = t - t.mean()
+        var = float(dt @ dt)
+        if var > 0.0:
+            self._rate = max(0.0, float(dt @ (s - s.mean())) / var)
+        self._offset = float(np.max(s - self._rate * t))
+
+    def age(self, server_stamp: float, now: float = None) -> float:
+        """Lower bound on the age of a state stamped `server_stamp` at client time `now`
+        (time.monotonic()), in server seconds."""
+        if now is None:
+            now = time.monotonic()
+        server_now = self._rate * (now - self._recv_origin) + self._offset
+        return server_now - (server_stamp - self._stamp_origin)
 
 
 class XbotZmqClient:
@@ -475,7 +527,7 @@ class XbotZmqClient:
                     msg = self._jointstates_socket.recv(flags=zmq.NOBLOCK)
                     self._last_msg_rec_time = time.monotonic()
                     self._last_msg_seq, self._last_msg_stamp, self._last_joints_state_arr, self._last_imu_state_arr = self._extract_arrs_raw(msg)
-                    self._delta_estimator.update(self._last_msg_stamp)
+                    self._delta_estimator.update(self._last_msg_stamp, self._last_msg_rec_time)
                     # print(f"[{self._sense_call_count}] {time.monotonic()*1000:.3f} Received joint state message {self._last_msg_seq} of size {len(msg)} bytes after waiting {self._last_msg_rec_time - t0:.3f} seconds")
                     age = self._delta_estimator.age(self._last_msg_stamp)
                     if age > self._max_state_age_s:
@@ -510,8 +562,10 @@ class XbotZmqClient:
         return self._last_msg_rec_time
 
     def get_state_age_estimate(self):
-        """Get the age of the last received robot state message in seconds. Returns None if no message has been received yet.
-        This is an estimate, only use it a lower bound (age is at least this much)"""
+        """Get the age of the last received robot state message in seconds of the server's
+        clock (simulation seconds when the server runs on a simulated clock). Returns None if no
+        message has been received yet. This is an estimate, only use it a lower bound (age is at
+        least this much)"""
         return self._delta_estimator.age(self._last_msg_stamp) if self._last_msg_rec_time != float("-inf") else None
 
     def wait_for_state_stream(self, timeout_s: float, min_seq_delta: int = 1):

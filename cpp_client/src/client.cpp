@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -51,6 +52,8 @@ std::uint64_t monotonic_ns() {
   return static_cast<std::uint64_t>(now.tv_sec) * 1000000000ULL +
          static_cast<std::uint64_t>(now.tv_nsec);
 }
+
+double monotonic_s() { return static_cast<double>(monotonic_ns()) * 1.0e-9; }
 
 int to_ms(const double timeout_s) {
   if (timeout_s < 0.0) return -1;
@@ -114,6 +117,78 @@ void decode_state(const void* const data, const std::size_t size,
     std::memcpy(out.imus.data(), bytes + offset, imu_values * sizeof(double));
 }
 
+ClockDeltaEstimator::ClockDeltaEstimator(const std::size_t window,
+                                         const std::size_t refit_every)
+    : window_(window),
+      refit_every_(refit_every),
+      recv_(window, 0.0),
+      stamp_(window, 0.0) {
+  if (window < 2 || refit_every < 1)
+    throw std::invalid_argument(
+        "ClockDeltaEstimator needs a window of at least 2 and refit_every >= 1.");
+  reset();
+}
+
+void ClockDeltaEstimator::reset() {
+  count_ = 0;
+  head_ = 0;
+  recv_origin_ = 0.0;
+  stamp_origin_ = 0.0;
+  last_stamp_ = -std::numeric_limits<double>::infinity();
+  rate_ = 1.0;
+  offset_ = 0.0;
+}
+
+void ClockDeltaEstimator::update(const double server_stamp,
+                                 const double recv_time) {
+  if (server_stamp < last_stamp_) reset();
+  last_stamp_ = server_stamp;
+  if (count_ == 0) {
+    recv_origin_ = recv_time;
+    stamp_origin_ = server_stamp;
+  }
+  const double t = recv_time - recv_origin_;
+  const double s = server_stamp - stamp_origin_;
+  recv_[head_] = t;
+  stamp_[head_] = s;
+  head_ = (head_ + 1) % window_;
+  ++count_;
+  if (count_ == 1) {
+    offset_ = s - rate_ * t;
+  } else if (count_ % refit_every_ == 0) {
+    refit();
+  } else {
+    offset_ = std::max(offset_, s - rate_ * t);
+  }
+}
+
+void ClockDeltaEstimator::refit() {
+  const std::size_t n = std::min(count_, window_);
+  double t_mean = 0.0, s_mean = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    t_mean += recv_[i];
+    s_mean += stamp_[i];
+  }
+  t_mean /= static_cast<double>(n);
+  s_mean /= static_cast<double>(n);
+  double var = 0.0, cov = 0.0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const double dt = recv_[i] - t_mean;
+    var += dt * dt;
+    cov += dt * (stamp_[i] - s_mean);
+  }
+  if (var > 0.0) rate_ = std::max(0.0, cov / var);
+  offset_ = -std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < n; ++i)
+    offset_ = std::max(offset_, stamp_[i] - rate_ * recv_[i]);
+}
+
+double ClockDeltaEstimator::age(const double server_stamp,
+                                const double now) const {
+  const double server_now = rate_ * (now - recv_origin_) + offset_;
+  return server_now - (server_stamp - stamp_origin_);
+}
+
 struct Client::Impl {
   explicit Impl(ClientOptions client_options)
       : options(std::move(client_options)),
@@ -140,6 +215,8 @@ struct Client::Impl {
   std::vector<std::string> imu_names;
   std::unordered_map<std::string, std::int32_t> joint_ids;
   RobotState state;
+  bool has_state = false;
+  ClockDeltaEstimator clock_delta;
   std::uint32_t command_seq = 0;
   std::uint64_t session_id = 0;
 };
@@ -227,12 +304,20 @@ bool Client::sense(const double timeout_s) {
   zmq::message_t message;
   if (!impl_->state_socket->recv(message, zmq::recv_flags::dontwait))
     return false;
+  const double recv_time = monotonic_s();
   decode_state(message.data(), message.size(), impl_->joint_names.size(),
                impl_->imu_names.size(), impl_->state);
+  impl_->clock_delta.update(impl_->state.stamp, recv_time);
+  impl_->has_state = true;
   return true;
 }
 
 const RobotState& Client::state() const { return impl_->state; }
+
+double Client::state_age() const {
+  if (!impl_->has_state) return std::numeric_limits<double>::quiet_NaN();
+  return impl_->clock_delta.age(impl_->state.stamp, monotonic_s());
+}
 
 void Client::send(const JointsCommand& command) {
   if (!impl_->command_socket)
