@@ -55,6 +55,7 @@ NB_MODULE(xbot2_zmq_client, m) {
       .def("reset", &ClockDeltaEstimator::reset)
       .def("update", &ClockDeltaEstimator::update, nb::arg("server_stamp"),
            nb::arg("recv_time"))
+      .def("server_time", &ClockDeltaEstimator::server_time, nb::arg("now"))
       .def("age", &ClockDeltaEstimator::age, nb::arg("server_stamp"),
            nb::arg("now"))
       .def_prop_ro("rate", &ClockDeltaEstimator::rate)
@@ -71,6 +72,7 @@ NB_MODULE(xbot2_zmq_client, m) {
            nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro("state", &Client::state)
       .def("state_age", &Client::state_age)
+      .def("server_time", &Client::server_time)
       .def("send", &Client::send, nb::arg("command"))
       .def("request", &Client::request, nb::arg("type"),
            nb::arg("timeout_s") = 5.0,

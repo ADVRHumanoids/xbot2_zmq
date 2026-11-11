@@ -84,6 +84,23 @@ class ClockDeltaEstimatorTest(unittest.TestCase):
         self.assertAlmostEqual(estimator.age(stamps[-1], recv[-1]),
                                0.5 * (latency[-1] - MIN_LATENCY), delta=1e-4)
 
+    def test_server_time_tracks_the_server_clock(self):
+        for rate in self.RATES:
+            for origin in self.SERVER_ORIGINS:
+                with self.subTest(rate=rate, origin=origin):
+                    stamps, recv, latency = stream(rate, origin, 3000)
+                    estimator = ClockDeltaEstimator()
+                    feed(estimator, stamps, recv)
+                    # The server clock when a state arrives, less the minimum latency.
+                    for i in range(-50, 0):
+                        expected = stamps[i] + rate * (latency[i] - MIN_LATENCY)
+                        self.assertAlmostEqual(estimator.server_time(recv[i]), expected, delta=1e-4)
+                        self.assertEqual(estimator.age(stamps[i], recv[i]),
+                                         estimator.server_time(recv[i]) - stamps[i])
+
+    def test_server_time_is_nan_before_the_first_state(self):
+        self.assertTrue(np.isnan(ClockDeltaEstimator().server_time(CLIENT_ORIGIN)))
+
     def test_first_state_has_zero_age_on_arrival(self):
         estimator = ClockDeltaEstimator()
         estimator.update(1.79e9, CLIENT_ORIGIN)

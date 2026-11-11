@@ -207,13 +207,19 @@ class ClockDeltaEstimator:
             self._rate = max(0.0, float(dt @ (s - s.mean())) / var)
         self._offset = float(np.max(s - self._rate * t))
 
+    def server_time(self, now: float = None) -> float:
+        """Server clock at client time `now` (time.monotonic()); NaN before the first state.
+        It lags the server's clock by at least the minimum one-way latency."""
+        if self._count == 0:
+            return float("nan")
+        if now is None:
+            now = time.monotonic()
+        return self._stamp_origin + self._rate * (now - self._recv_origin) + self._offset
+
     def age(self, server_stamp: float, now: float = None) -> float:
         """Lower bound on the age of a state stamped `server_stamp` at client time `now`
         (time.monotonic()), in server seconds."""
-        if now is None:
-            now = time.monotonic()
-        server_now = self._rate * (now - self._recv_origin) + self._offset
-        return server_now - (server_stamp - self._stamp_origin)
+        return self.server_time(now) - server_stamp
 
 
 class XbotZmqClient:
@@ -560,6 +566,13 @@ class XbotZmqClient:
         """Get the timestamp of when the last robot state message was received, in time.monotonic time.
             Returns None if no message has been received yet."""
         return self._last_msg_rec_time
+
+    def get_server_time(self):
+        """Estimate of the server's clock now: the XBot2 clock zmq_io stamps the states with
+        (Unix time on a robot, simulation time when XBot2 runs on a simulated clock). It lags
+        that clock by at least the minimum one-way latency. Returns None if no message has
+        been received yet."""
+        return self._delta_estimator.server_time() if self._last_msg_rec_time != float("-inf") else None
 
     def get_state_age_estimate(self):
         """Get the age of the last received robot state message in seconds of the server's

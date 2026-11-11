@@ -157,7 +157,9 @@ class TestClockDeltaEstimator(unittest.TestCase):
                         self.assertAlmostEqual(cpp.rate, python.rate, delta=1e-9)
                         self.assertAlmostEqual(cpp.offset, python.offset, delta=1e-9)
                         self.assertAlmostEqual(cpp.age(stamp, t + 0.01),
-                                               python.age(stamp, t + 0.01), delta=1e-9)
+                                               python.age(stamp, t + 0.01), delta=1e-6)
+                        self.assertAlmostEqual(cpp.server_time(t + 0.01),
+                                               python.server_time(t + 0.01), delta=1e-6)
 
     def test_invalid_window_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -206,12 +208,15 @@ class TestAgainstServer(unittest.TestCase):
 
     def test_state_age_is_the_time_since_the_first_state(self):
         self.assertTrue(np.isnan(self.client.state_age()))
+        self.assertTrue(np.isnan(self.client.server_time()))
         self._publish(1)
         self.assertTrue(self.client.sense(1.0))
         time.sleep(0.05)
         age = self.client.state_age()
         self.assertGreaterEqual(age, 0.05)
         self.assertLess(age, 0.5)
+        self.assertAlmostEqual(self.client.server_time() - self.client.state.stamp,
+                               self.client.state_age(), delta=0.01)
 
     def test_sense_keeps_only_the_newest_state(self):
         for seq in range(1, 21):

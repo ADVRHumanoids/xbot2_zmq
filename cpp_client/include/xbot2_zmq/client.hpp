@@ -93,6 +93,10 @@ class ClockDeltaEstimator {
   /** Add a state stamped `server_stamp`, received at `recv_time` (CLOCK_MONOTONIC,
    * seconds). */
   void update(double server_stamp, double recv_time);
+  /** Server clock at client time `now` (CLOCK_MONOTONIC, seconds); NaN before the
+   * first state. It lags the server's clock by at least the minimum one-way
+   * latency. */
+  double server_time(double now) const;
   /** Lower bound on the age of a state stamped `server_stamp` at client time `now`
    * (CLOCK_MONOTONIC, seconds), in server seconds. */
   double age(double server_stamp, double now) const;
@@ -147,6 +151,11 @@ class Client {
    * seconds when the server runs on a simulated clock); NaN before the first
    * state. See ClockDeltaEstimator. */
   double state_age() const;
+  /** Estimate of the server's clock now: the XBot2 clock zmq_io stamps the
+   * states with (Unix time on a robot, simulation time when XBot2 runs on a
+   * simulated clock). It lags that clock by at least the minimum one-way
+   * latency. NaN before the first state. See ClockDeltaEstimator. */
+  double server_time() const;
 
   /** Publish one command, stamped with the monotonic clock. */
   void send(const JointsCommand& command);

@@ -183,10 +183,14 @@ void ClockDeltaEstimator::refit() {
     offset_ = std::max(offset_, stamp_[i] - rate_ * recv_[i]);
 }
 
+double ClockDeltaEstimator::server_time(const double now) const {
+  if (count_ == 0) return std::numeric_limits<double>::quiet_NaN();
+  return stamp_origin_ + rate_ * (now - recv_origin_) + offset_;
+}
+
 double ClockDeltaEstimator::age(const double server_stamp,
                                 const double now) const {
-  const double server_now = rate_ * (now - recv_origin_) + offset_;
-  return server_now - (server_stamp - stamp_origin_);
+  return server_time(now) - server_stamp;
 }
 
 struct Client::Impl {
@@ -313,6 +317,10 @@ bool Client::sense(const double timeout_s) {
 }
 
 const RobotState& Client::state() const { return impl_->state; }
+
+double Client::server_time() const {
+  return impl_->clock_delta.server_time(monotonic_s());
+}
 
 double Client::state_age() const {
   if (!impl_->has_state) return std::numeric_limits<double>::quiet_NaN();
