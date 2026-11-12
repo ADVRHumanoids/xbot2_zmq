@@ -34,6 +34,10 @@ zmq_io:
   thread: nrt_main
   params:
     autostart: true
+    # Clock of the state stamps: system (default; Unix time, comparable across machines
+    # and with ROS stamps) or steady (monotonic, never jumps). Both follow the simulation
+    # time when XBot2 runs on a simulated clock.
+    stamp_clock: system
     protocol: tcp # either tcp or ipc
     tcp_state_port: 5559
     tcp_cmd_port: 5558
