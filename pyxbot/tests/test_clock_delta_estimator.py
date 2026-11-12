@@ -3,7 +3,7 @@
 import unittest
 
 import numpy as np
-
+import time
 from pyxbot.zmq_client import ClockDeltaEstimator
 
 STATE_PERIOD = 1e-3  # server seconds between states
@@ -106,6 +106,20 @@ class ClockDeltaEstimatorTest(unittest.TestCase):
         estimator.update(1.79e9, CLIENT_ORIGIN)
         self.assertEqual(estimator.age(1.79e9, CLIENT_ORIGIN), 0.0)
 
+    def test_sleep_server_time(self):
+        for rate in self.RATES:
+            for origin in self.SERVER_ORIGINS:
+                with self.subTest(rate=rate, origin=origin):
+                    stamps, recv, latency = stream(rate, origin, 3000)
+                    estimator = ClockDeltaEstimator()
+                    feed(estimator, stamps, recv)
+                    # The server clock when a state arrives, less the minimum latency.
+                    durations = [0.001,0.01,0.1,1.0]
+                    for duration in durations:
+                        t0 = time.monotonic()
+                        estimator.sleep_server_time(duration)
+                        t1 = time.monotonic()
+                        self.assertAlmostEqual(t1 - t0, duration / rate, delta=1e-3)
 
 if __name__ == "__main__":
     unittest.main()

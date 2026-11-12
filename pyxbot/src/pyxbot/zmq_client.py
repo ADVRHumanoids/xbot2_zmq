@@ -216,6 +216,12 @@ class ClockDeltaEstimator:
             now = time.monotonic()
         return self._stamp_origin + self._rate * (now - self._recv_origin) + self._offset
 
+    def sleep_server_time(self, seconds : float):
+        """Sleep for `duration_sec` seconds of (estimated) server time."""
+        if self._count == 0:
+            raise RuntimeError("ClockDeltaEstimator has no data yet, cannot sleep for server time")
+        time.sleep(seconds / self._rate)
+
     def age(self, server_stamp: float, now: float = None) -> float:
         """Lower bound on the age of a state stamped `server_stamp` at client time `now`
         (time.monotonic()), in server seconds."""
@@ -573,6 +579,11 @@ class XbotZmqClient:
         that clock by at least the minimum one-way latency. Returns None if no message has
         been received yet."""
         return self._delta_estimator.server_time() if self._last_msg_rec_time != float("-inf") else None
+
+    def sleep_server_time(self, seconds: float):
+        """Sleep for `seconds` seconds of (estimated) server time. Raises RuntimeError if no
+        state message has been received yet, so the server time cannot be estimated."""
+        self._delta_estimator.sleep_server_time(seconds)
 
     def get_state_age_estimate(self):
         """Get the age of the last received robot state message in seconds of the server's
